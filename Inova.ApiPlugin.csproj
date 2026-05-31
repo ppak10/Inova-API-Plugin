@@ -9,6 +9,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <ProjectReference Include="..\SLS4All.Compact\SLS4All.Compact\SLS4All.Compact.csproj" />
     <ProjectReference Include="..\SLS4All.Compact\SLS4All.Compact.Core\SLS4All.Compact.Core.csproj" />
   </ItemGroup>

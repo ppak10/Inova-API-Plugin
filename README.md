@@ -168,7 +168,7 @@ Iteration is currently ~30 seconds end-to-end after the initial setup.
 ## Design notes
 
 - **Own port (5001), not the firmware's port (5000).** The firmware's Kestrel only auto-discovers MVC controllers from the AppCore assembly. Contributing controllers from a plugin assembly would require either patching `StartupBase.cs` to call `AddApplicationPart` for plugin assemblies, or working around the auto-discovery somehow. Running our own `HttpListener` on a side port avoids this entirely and keeps the plugin a zero-firmware-fork solution.
-- **`HttpListener` for MVP, not Kestrel.** A single endpoint with no JSON, routing, or auth doesn't justify standing up a parallel `WebApplication` host inside our `IHostedService`. Once we start adding real endpoints we'll likely switch to Kestrel / Minimal APIs for clean routing and content negotiation.
+- **Kestrel + minimal APIs.** The plugin stands up a child `WebApplication` inside its `IHostedService.StartAsync` using `WebApplication.CreateSlimBuilder`, binding Kestrel to port 5001. Endpoints are declared with `app.MapGet`/`MapPost`/etc. The MVP started on `HttpListener` to validate the plugin loader and toolchain end-to-end; once it worked we switched, since `Microsoft.AspNetCore.App` is already in the firmware's runtime (so no DLL cost) and routing + JSON + WebSocket support + DI per handler all become free.
 - **No auth.** The deployed firmware has `[Authorize]` on its own controllers but auth is effectively disabled on this unit (we verified by curling `/api/status` unauthenticated). The plugin matches that — wide open on the LAN. Plan to add auth before exposing this to anything beyond a trusted network.
 
 ## Related
