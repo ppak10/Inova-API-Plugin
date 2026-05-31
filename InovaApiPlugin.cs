@@ -5,6 +5,8 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using SLS4All.Compact.Helpers;
 using SLS4All.Compact.Movement;
+using SLS4All.Compact.Power;
+using SLS4All.Compact.Temperature;
 
 namespace Inova.ApiPlugin;
 
@@ -37,6 +39,9 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
         // Forward firmware services into the child container so endpoint handlers
         // can declare them as parameters. Same instance the firmware uses.
         Forward<IMovementClient>(builder.Services);
+        Forward<ILightsClient>(builder.Services);
+        Forward<IPowerClient>(builder.Services);
+        Forward<ITemperatureClient>(builder.Services);
 
         _app = builder.Build();
         MapEndpoints(_app, _startedAt);
@@ -73,5 +78,19 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
         });
 
         app.MapGet("/movement/position", (IMovementClient movement) => movement.CurrentPosition);
+
+        app.MapGet("/lights/state", (ILightsClient lights) => new
+        {
+            isEnabled = lights.CurrentState.IsEnabled,
+            lightCount = lights.LightCount,
+        });
+
+        app.MapGet("/power/current", (IPowerClient power) => power.CurrentState);
+
+        // TemperatureState includes BedMatrix (IR thermal pixels, ~50 KB) we don't
+        // want to ship over JSON on every poll. Use /api/bedmatrix/image/... for
+        // the rendered thermal heatmap (existing firmware endpoint on port 80).
+        app.MapGet("/temperature/current", (ITemperatureClient temperature)
+            => new { entries = temperature.CurrentState.Entries });
     }
 }
