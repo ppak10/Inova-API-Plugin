@@ -16,6 +16,7 @@ MVP. The plugin currently exposes one endpoint (`GET /ping`) used to validate th
 | `InovaApiPlugin.cs` | Plugin entry point. Implements `IHostedService` (start/stop lifecycle) and `IConstructable` (eager construction by the firmware). Opens an `HttpListener` on port 5001. |
 | `build.sh` | Dev-side: runs `dotnet build -c Release` and stages the resulting DLL into `dist/` for commit. |
 | `install.sh` | Printer-side: copies `dist/Inova.ApiPlugin.dll` into `~/SLS4All/Plugins/Inova.ApiPlugin/` and idempotently edits `~/SLS4All/Configuration/appsettings.user.toml`. |
+| `uninstall.sh` | Printer-side: removes the plugin DLL and strips the marker block from `appsettings.user.toml`. Inverse of `install.sh`. |
 | `dist/Inova.ApiPlugin.dll` | Prebuilt plugin binary, committed so the printer can install without a .NET SDK. |
 
 ## How it works
@@ -33,7 +34,16 @@ The plugin loads into the same process as `SLS4All.Compact.PrinterApp` and share
 ### Requirements
 
 - .NET 10 SDK. The deployed firmware runs on .NET 10.0.8; matching the major version is required.
-- A clone of the [SLS4All.Compact](https://github.com/sls4all/SLS4All.Compact) firmware source at `../SLS4All.Compact/` (sibling directory). The `.csproj` references it for the `SLS4All.Compact` and `SLS4All.Compact.Core` projects.
+- The [SLS4All.Compact](https://github.com/sls4all/SLS4All.Compact) firmware source at `../SLS4All.Compact/` (sibling directory). The `.csproj` references it for the `SLS4All.Compact` and `SLS4All.Compact.Core` projects.
+
+  When this repo is used as a submodule of a parent that includes both repos side-by-side (e.g. `<parent>/sls4all/Inova-API-Plugin/` and `<parent>/sls4all/SLS4All.Compact/`), running `git submodule update --init --recursive` on the parent satisfies the layout automatically.
+
+  When cloning this repo standalone, place SLS4All.Compact next to it manually:
+
+  ```bash
+  cd ..
+  git clone https://github.com/sls4all/SLS4All.Compact.git
+  ```
 
 ### Steps
 
@@ -122,16 +132,25 @@ If you get a connection error, check the firmware log at `~/SLS4All/Current/logs
 
 ## Uninstall
 
-```bash
-# Remove the plugin DLL
-rm -rf ~/SLS4All/Plugins/Inova.ApiPlugin
+From the clone on the printer:
 
-# Remove the marker block from appsettings.user.toml
+```bash
+cd ~/GitHub/Inova-API-Plugin
+./uninstall.sh
+# then restart the firmware (see above)
+```
+
+`uninstall.sh` is the inverse of `install.sh`. It strips the plugin's marker block from `~/SLS4All/Configuration/appsettings.user.toml` and removes `~/SLS4All/Plugins/Inova.ApiPlugin/`. It is idempotent — safe to re-run, and reports `Skipped:` for anything already absent.
+
+If the repo clone is no longer available on the printer (e.g. the user deleted it), the same two operations can be performed by hand:
+
+```bash
 sed -i '/^# >>> Inova.ApiPlugin/,/^# <<< Inova.ApiPlugin/d' \
     ~/SLS4All/Configuration/appsettings.user.toml
-
-# Restart the firmware (see above)
+rm -rf ~/SLS4All/Plugins/Inova.ApiPlugin
 ```
+
+Neither variant restarts the firmware — see the Restart section above.
 
 ## Development workflow
 
