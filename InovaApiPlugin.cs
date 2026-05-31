@@ -4,31 +4,42 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using SLS4All.Compact.Helpers;
+using SLS4All.Compact.Movement;
 
 namespace Inova.ApiPlugin;
 
 public sealed class InovaApiPlugin : IHostedService, IConstructable
 {
     private const int Port = 5001;
+    private const string Version = "0.1.0";
 
+    private readonly IServiceProvider _parent;
     private readonly ILogger<InovaApiPlugin> _logger;
+    private DateTimeOffset _startedAt;
     private WebApplication? _app;
 
-    public InovaApiPlugin(ILogger<InovaApiPlugin> logger)
+    public InovaApiPlugin(IServiceProvider parent, ILogger<InovaApiPlugin> logger)
     {
+        _parent = parent;
         _logger = logger;
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
+        _startedAt = DateTimeOffset.UtcNow;
+
         var builder = WebApplication.CreateSlimBuilder();
-        // The firmware's SimpleFileLogger already covers our class's logs; suppress
-        // the child host's default providers to avoid double-logging to console.
+        // Firmware's SimpleFileLogger covers our class's logs; silence the child
+        // host's default providers to avoid double-logging to console.
         builder.Logging.ClearProviders();
         builder.WebHost.UseKestrel(o => o.ListenAnyIP(Port));
 
+        // Forward firmware services into the child container so endpoint handlers
+        // can declare them as parameters. Same instance the firmware uses.
+        Forward<IMovementClient>(builder.Services);
+
         _app = builder.Build();
-        MapEndpoints(_app);
+        MapEndpoints(_app, _startedAt);
 
         await _app.StartAsync(cancellationToken).ConfigureAwait(false);
         _logger.LogInformation("Inova API plugin listening on http://+:{Port}/", Port);
@@ -45,8 +56,22 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
         _logger.LogInformation("Inova API plugin stopped");
     }
 
-    private static void MapEndpoints(WebApplication app)
+    private void Forward<T>(IServiceCollection services) where T : class
+        => services.AddSingleton(_parent.GetRequiredService<T>());
+
+    private static void MapEndpoints(WebApplication app, DateTimeOffset startedAt)
     {
         app.MapGet("/ping", () => "pong");
+
+        app.MapGet("/info", () => new
+        {
+            plugin = "Inova.ApiPlugin",
+            version = Version,
+            listenPort = Port,
+            startedAtUtc = startedAt,
+            uptimeSeconds = (DateTimeOffset.UtcNow - startedAt).TotalSeconds,
+        });
+
+        app.MapGet("/movement/position", (IMovementClient movement) => movement.CurrentPosition);
     }
 }
