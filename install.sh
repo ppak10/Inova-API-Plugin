@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# install.sh — install/update the Inova-API-Plugin on the printer.
+#
+# Run on the printer (e.g. inova). Idempotent: safe to re-run after `git pull`.
+#
+#   1. Copies dist/Inova.ApiPlugin.dll into ~/SLS4All/Plugins/Inova.ApiPlugin/
+#   2. Adds/refreshes plugin entries in ~/SLS4All/Configuration/appsettings.user.toml
+#      (delimited by a marker block so re-runs don't duplicate)
+#
+# Does NOT restart the SLS4All service — the firmware must be restarted
+# manually for changes to take effect.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Overridable via env if the layout differs
+SLS4ALL_HOME="${SLS4ALL_HOME:-${HOME}/SLS4All}"
+PLUGIN_NAME="Inova.ApiPlugin"
+PLUGIN_TYPE="Inova.ApiPlugin.InovaApiPlugin"
+
+PLUGIN_DIR="${SLS4ALL_HOME}/Plugins/${PLUGIN_NAME}"
+USER_CONFIG="${SLS4ALL_HOME}/Configuration/appsettings.user.toml"
+DLL_SRC="${SCRIPT_DIR}/dist/${PLUGIN_NAME}.dll"
+DLL_DST="${PLUGIN_DIR}/${PLUGIN_NAME}.dll"
+
+MARKER_BEGIN="# >>> ${PLUGIN_NAME} (managed by install.sh) >>>"
+MARKER_END="# <<< ${PLUGIN_NAME} (managed by install.sh) <<<"
+
+# --- Sanity ---
+if [[ ! -f "${DLL_SRC}" ]]; then
+    echo "ERROR: ${DLL_SRC} not found. Run build.sh on the dev machine and commit dist/." >&2
+    exit 1
+fi
+if [[ ! -d "${SLS4ALL_HOME}" ]]; then
+    echo "ERROR: ${SLS4ALL_HOME} not found. Are you running this on the printer?" >&2
+    exit 1
+fi
+if [[ ! -d "$(dirname "${USER_CONFIG}")" ]]; then
+    echo "ERROR: $(dirname "${USER_CONFIG}") not found." >&2
+    exit 1
+fi
+
+# --- 1. Copy DLL ---
+mkdir -p "${PLUGIN_DIR}"
+cp -f "${DLL_SRC}" "${DLL_DST}"
+echo "Installed: ${DLL_DST}"
+
+# --- 2. Update appsettings.user.toml ---
+# Strip any prior marker block, then append a fresh one. Tolerant of missing file.
+TMP_CONFIG="$(mktemp)"
+trap 'rm -f "${TMP_CONFIG}"' EXIT
+
+if [[ -f "${USER_CONFIG}" ]]; then
+    # Drop anything between (and including) our markers
+    sed "/^${MARKER_BEGIN}$/,/^${MARKER_END}$/d" "${USER_CONFIG}" > "${TMP_CONFIG}"
+else
+    : > "${TMP_CONFIG}"
+fi
+
+# Ensure trailing newline before appending
+if [[ -s "${TMP_CONFIG}" ]] && [[ "$(tail -c1 "${TMP_CONFIG}")" != $'\n' ]]; then
+    echo "" >> "${TMP_CONFIG}"
+fi
+
+cat >> "${TMP_CONFIG}" <<EOF
+${MARKER_BEGIN}
+[Application.PluginAssemblies]
+${PLUGIN_NAME} = "${DLL_DST}"
+
+[Application.PluginServices.${PLUGIN_NAME}]
+Implementation = "${PLUGIN_TYPE}, ${PLUGIN_NAME}"
+Registration = "AsImplementationAndInterfaces"
+Lifetime = "Singleton"
+${MARKER_END}
+EOF
+
+mv "${TMP_CONFIG}" "${USER_CONFIG}"
+trap - EXIT
+echo "Updated:   ${USER_CONFIG}"
+
+echo ""
+echo "Plugin installed. Restart the SLS4All service for changes to take effect."

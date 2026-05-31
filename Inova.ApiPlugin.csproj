@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Inova.ApiPlugin</RootNamespace>
+    <AssemblyName>Inova.ApiPlugin</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SLS4All.Compact\SLS4All.Compact\SLS4All.Compact.csproj" />
+    <ProjectReference Include="..\SLS4All.Compact\SLS4All.Compact.Core\SLS4All.Compact.Core.csproj" />
+  </ItemGroup>
+
+</Project>
