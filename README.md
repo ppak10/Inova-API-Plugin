@@ -82,10 +82,12 @@ cd Inova-API-Plugin
 
    ```toml
    # >>> Inova.ApiPlugin (managed by install.sh) >>>
+   # Keys must be quoted because they contain dots — unquoted dotted keys
+   # in TOML are interpreted as nested tables, not literal single-key names.
    [Application.PluginAssemblies]
-   Inova.ApiPlugin = "/home/<user>/SLS4All/Plugins/Inova.ApiPlugin/Inova.ApiPlugin.dll"
+   "Inova.ApiPlugin" = "/home/<user>/SLS4All/Plugins/Inova.ApiPlugin/Inova.ApiPlugin.dll"
 
-   [Application.PluginServices.Inova.ApiPlugin]
+   [Application.PluginServices."Inova.ApiPlugin"]
    Implementation = "Inova.ApiPlugin.InovaApiPlugin, Inova.ApiPlugin"
    Registration = "AsImplementationAndInterfaces"
    Lifetime = "Singleton"

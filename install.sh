@@ -65,10 +65,12 @@ fi
 
 cat >> "${TMP_CONFIG}" <<EOF
 ${MARKER_BEGIN}
+# Keys must be quoted because they contain dots — unquoted dotted keys
+# in TOML are interpreted as nested tables, not literal single-key names.
 [Application.PluginAssemblies]
-${PLUGIN_NAME} = "${DLL_DST}"
+"${PLUGIN_NAME}" = "${DLL_DST}"
 
-[Application.PluginServices.${PLUGIN_NAME}]
+[Application.PluginServices."${PLUGIN_NAME}"]
 Implementation = "${PLUGIN_TYPE}, ${PLUGIN_NAME}"
 Registration = "AsImplementationAndInterfaces"
 Lifetime = "Singleton"
