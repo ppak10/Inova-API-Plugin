@@ -4,3 +4,13 @@ obj/
 *.suo
 .vs/
 .idea/
+
+# Python (client/python)
+__pycache__/
+.venv/
+*.egg-info/
+
+# Node / TypeScript (client/typescript)
+node_modules/
+client/typescript/dist/
+*.tsbuildinfo

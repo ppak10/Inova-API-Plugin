@@ -1,106 +1,87 @@
 # Inova-API-Plugin
 
-A plugin for the [SLS4All Compact](https://sls4all.com/) firmware running on the Inova MK1 (Raspberry Pi 5) that exposes the printer's services over an HTTP API on a side port. The aim is a clean control + telemetry surface that external tools (Python scripts, a custom React frontend, research notebooks) can use to drive prints, run tests, and capture data without modifying the core firmware.
+A plugin for the [SLS4All Compact](https://sls4all.com/) firmware on the Inova MK1 (Raspberry Pi 5) that exposes the printer's services over an HTTP + WebSocket API on a side port. Loads into `SLS4All.Compact.PrinterApp` via the firmware's plugin loader, serves on port **5001**, leaves the firmware's own Blazor UI untouched on its usual port.
 
-The plugin loads alongside `SLS4All.Compact.PrinterApp` via the firmware's built-in plugin loader (`[Application.PluginAssemblies]`), runs as an `IHostedService`, and serves HTTP on **port 5001** while the firmware's Blazor UI continues on its usual port.
+## API surface
 
-## Status
+| Endpoint | Returns |
+| --- | --- |
+| `GET /ping` | `"pong"` |
+| `GET /info` | plugin metadata + uptime |
+| `GET /movement/position` | live galvo `{ x, y, z1, z2, r }` |
+| `GET /lights/state` | `{ isEnabled, lightCount }` |
+| `GET /power/current` | per-output power + powerman state |
+| `GET /temperature/current` | per-sensor temperature entries (no IR matrix) |
+| `GET /state/snapshot` | combined snapshot of all telemetry |
+| `WS /state/stream?hz=N` | periodic snapshots, 1–100 Hz (default 10) |
 
-MVP. The plugin currently exposes one endpoint (`GET /ping`) used to validate the toolchain end-to-end (build, deploy, plugin load, port reachable). Real control + telemetry endpoints will be added on top of this plumbing.
+All data endpoints wrap their payload in `{ respondedAt, data: ... }`. Combined with the per-sample `elapsedFromNow` field where the firmware provides it, clients can reconstruct sub-second wall-clock time for each underlying reading.
+
+Sample clients in `client/` — Python (`httpx` + `websockets`) and TypeScript (`ws`).
 
 ## Repository layout
 
 | Path | Purpose |
 | --- | --- |
-| `Inova.ApiPlugin.csproj` | .NET project targeting `net10.0`. References the SLS4All.Compact source clone (see Build requirements). |
-| `InovaApiPlugin.cs` | Plugin entry point. Implements `IHostedService` (start/stop lifecycle) and `IConstructable` (eager construction by the firmware). Opens an `HttpListener` on port 5001. |
-| `build.sh` | Dev-side: runs `dotnet build -c Release` and stages the resulting DLL into `dist/` for commit. |
-| `install.sh` | Printer-side: copies `dist/Inova.ApiPlugin.dll` into `~/SLS4All/Plugins/Inova.ApiPlugin/` and idempotently edits `~/SLS4All/Configuration/appsettings.user.toml`. |
-| `uninstall.sh` | Printer-side: removes the plugin DLL and strips the marker block from `appsettings.user.toml`. Inverse of `install.sh`. |
-| `dist/Inova.ApiPlugin.dll` | Prebuilt plugin binary, committed so the printer can install without a .NET SDK. |
+| `Inova.ApiPlugin.csproj` | .NET 10 project. References `SLS4All.Compact` + `SLS4All.Compact.Core`. |
+| `InovaApiPlugin.cs` | Plugin entry. `IHostedService` + `IConstructable`. Hosts Kestrel via `WebApplication.CreateSlimBuilder` and forwards firmware services into the child DI container. |
+| `build.sh` | Dev-side: `dotnet build -c Release`, stages the DLL into `dist/`. |
+| `install.sh` | Printer-side: copies the DLL into `~/SLS4All/Plugins/Inova.ApiPlugin/` and idempotently edits `~/SLS4All/Configuration/appsettings.user.toml`. |
+| `uninstall.sh` | Inverse of `install.sh`. |
+| `dist/Inova.ApiPlugin.dll` | Committed prebuilt — printer can install without a .NET SDK. |
+| `client/python/`, `client/typescript/` | Reference clients with runnable examples. |
 
 ## How it works
 
-The SLS4All firmware loads plugin assemblies named in `[Application.PluginAssemblies]` via `Assembly.LoadFrom`, registers types from `[Application.PluginServices.*]` with the DI container, and the ASP.NET host then starts any registered `IHostedService` automatically. Our entry class implements both `IHostedService` and `IConstructable`:
+The firmware loads our DLL via `Assembly.LoadFrom` (configured under `[Application.PluginAssemblies]`) and registers our entry class as a singleton exposed as all its interfaces (configured under `[Application.PluginServices.*]`). Because the class implements `IHostedService`, the host calls `StartAsync` on us; because it also implements `IConstructable`, the firmware constructs it eagerly at startup rather than lazily on first use.
 
-- `IConstructable` causes the firmware to eagerly construct the plugin at startup rather than lazily on first use.
-- `IHostedService.StartAsync` is called by the host once construction completes; this is where we start the `HttpListener` accept loop on port 5001.
-- `IHostedService.StopAsync` is called on shutdown; we stop the listener cleanly.
+`StartAsync` spins up a child `WebApplication` with Kestrel on port 5001 and forwards selected firmware singletons (`IMovementClient`, `ITemperatureClient`, `IPowerClient`, `ILightsClient`) into the child DI container. The forwarded services are the **same instances** the firmware uses internally — both containers reference one shared object per type, so handler reads and method calls land on the live state. See the `Forward<T>` helper in `InovaApiPlugin.cs`.
 
-The plugin loads into the same process as `SLS4All.Compact.PrinterApp` and shares its DI container, so any injected services (e.g., `ILogger`, and later `IPrintingService`, `IMovementClient`, etc.) come from the live printer state.
-
-## Build (dev machine)
-
-### Requirements
-
-- .NET 10 SDK. The deployed firmware runs on .NET 10.0.8; matching the major version is required.
-- The [SLS4All.Compact](https://github.com/sls4all/SLS4All.Compact) firmware source at `../SLS4All.Compact/` (sibling directory). The `.csproj` references it for the `SLS4All.Compact` and `SLS4All.Compact.Core` projects.
-
-  When this repo is used as a submodule of a parent that includes both repos side-by-side (e.g. `<parent>/sls4all/Inova-API-Plugin/` and `<parent>/sls4all/SLS4All.Compact/`), running `git submodule update --init --recursive` on the parent satisfies the layout automatically.
-
-  When cloning this repo standalone, place SLS4All.Compact next to it manually:
-
-  ```bash
-  cd ..
-  git clone https://github.com/sls4all/SLS4All.Compact.git
-  ```
-
-### Steps
+## Build
 
 ```bash
 ./build.sh
 ```
 
-`build.sh` runs `dotnet build -c Release` and copies the output DLL into `dist/`. Commit `dist/Inova.ApiPlugin.dll` so the printer can install without a .NET SDK of its own.
+Requirements:
 
-### Notes
+- .NET 10 SDK matching the deployed runtime (verified at 10.0.8).
+- The [SLS4All.Compact](https://github.com/sls4all/SLS4All.Compact) firmware source at `../SLS4All.Compact/`. When this repo is used as a submodule of a parent that also includes SLS4All.Compact side-by-side, `git submodule update --init --recursive` on the parent satisfies the layout. When cloning standalone, place SLS4All.Compact next to it manually.
 
-- The plugin does **not** reference `SLS4All.Compact.AppCore` because AppCore transitively depends on private NuGet packages (`SLS4All.Compact.Slicing`, `SLS4All.Compact.Nesting`, `SLS4All.Compact.Processing`) hosted on a private GitHub Packages feed that we don't have credentials for. Adding endpoints that need types from AppCore will require resolving this — likely by switching to direct `<Reference>` against the deployed DLLs on the printer.
-- The plugin DLL is architecture-neutral managed IL. The same `.dll` runs on `linux-arm64` (the printer) and any other .NET 10 host, so no `-r linux-arm64` is needed.
-- Build output is ~10 KB.
+Notes:
 
-## Install (on the printer)
+- The plugin does **not** reference `SLS4All.Compact.AppCore` because AppCore transitively depends on private NuGet packages from the SLS4All GitHub Packages feed. Endpoints that need types from AppCore would require either resolving the auth or referencing the deployed DLLs directly. `Core` has been enough so far.
+- The output DLL is architecture-neutral managed IL — same file runs on `linux-arm64` (the printer) and any other .NET 10 host.
 
-### Requirements
-
-- The plugin repo cloned somewhere readable on the printer (e.g., `~/GitHub/Inova-API-Plugin/`).
-- The SLS4All firmware deployed at `~/SLS4All/Current/` with a writable `~/SLS4All/Configuration/` directory (default layout).
-
-### Steps
+## Install on the printer
 
 ```bash
 cd ~/GitHub
 git clone <repo-url> Inova-API-Plugin
 cd Inova-API-Plugin
-./install.sh
+./install.sh        # copies DLL, edits appsettings.user.toml
+# then restart the firmware (see below)
 ```
 
-`install.sh` performs two actions:
+`install.sh` is idempotent — re-running after `git pull` cleanly replaces the previous deploy. It does **not** restart the firmware; changes take effect on next start.
 
-1. Copies `dist/Inova.ApiPlugin.dll` into `~/SLS4All/Plugins/Inova.ApiPlugin/`.
-2. Edits `~/SLS4All/Configuration/appsettings.user.toml` to add:
+The TOML edit is marker-bracketed:
 
-   ```toml
-   # >>> Inova.ApiPlugin (managed by install.sh) >>>
-   # Keys must be quoted because they contain dots — unquoted dotted keys
-   # in TOML are interpreted as nested tables, not literal single-key names.
-   [Application.PluginAssemblies]
-   "Inova.ApiPlugin" = "/home/<user>/SLS4All/Plugins/Inova.ApiPlugin/Inova.ApiPlugin.dll"
+```toml
+# >>> Inova.ApiPlugin (managed by install.sh) >>>
+[Application.PluginAssemblies]
+"Inova.ApiPlugin" = "/home/<user>/SLS4All/Plugins/Inova.ApiPlugin/Inova.ApiPlugin.dll"
 
-   [Application.PluginServices."Inova.ApiPlugin"]
-   Implementation = "Inova.ApiPlugin.InovaApiPlugin, Inova.ApiPlugin"
-   Registration = "AsImplementationAndInterfaces"
-   Lifetime = "Singleton"
-   # <<< Inova.ApiPlugin (managed by install.sh) <<<
-   ```
+[Application.PluginServices."Inova.ApiPlugin"]
+Implementation = "Inova.ApiPlugin.InovaApiPlugin, Inova.ApiPlugin"
+Registration = "AsImplementationAndInterfaces"
+Lifetime = "Singleton"
+# <<< Inova.ApiPlugin (managed by install.sh) <<<
+```
 
-The TOML edit is bracketed by markers so re-runs after `git pull` cleanly replace the block instead of appending duplicates.
+Keys are quoted because TOML treats unquoted dotted keys as nested tables — `Inova.ApiPlugin` would mean a sub-table, not a literal name.
 
-The install script does **not** restart the SLS4All service. Changes take effect on the next restart.
-
-### Overrides
-
-`SLS4ALL_HOME` defaults to `${HOME}/SLS4All`. Override via env if your layout differs:
+Override `SLS4ALL_HOME` (default `${HOME}/SLS4All`) if your layout differs:
 
 ```bash
 SLS4ALL_HOME=/some/other/path ./install.sh
@@ -108,70 +89,44 @@ SLS4ALL_HOME=/some/other/path ./install.sh
 
 ## Restart the firmware
 
-There is no systemd unit for SLS4All on the deployed printer. The launcher is a plain shell loop in `~/sls4all_run.sh` that re-launches `Current/sls4all_run_Inova_RaspberryPI5.sh` whenever it exits with code 5. To restart the running firmware, kill the process tree and re-launch:
+No systemd unit on this printer — the launcher is `~/sls4all_run.sh`, kicked off by an XDG autostart at desktop login. The simplest restart is `sudo reboot`. To soft-restart without rebooting:
 
 ```bash
-# Find the launcher PID (look for sls4all_run.sh at the top of the tree)
-pgrep -f sls4all_run.sh
-# Kill it (and the children will follow)
 pkill -f sls4all_run.sh
-# Re-launch in the background — your environment may already do this on login
 nohup ~/sls4all_run.sh -s >/dev/null 2>&1 &
 ```
 
-Restarting takes a few seconds for the .NET host to come up. The plugin should be loaded by the time the Blazor UI is reachable.
-
-## Verify
-
-Once the firmware is running with the plugin loaded, from any host on the same network:
+Verify:
 
 ```bash
-curl http://192.168.1.146:5001/ping
-# expected output: pong
+curl http://192.168.1.146:5001/ping        # → pong
 ```
 
-If you get a connection error, check the firmware log at `~/SLS4All/Current/logs/default*.log` for plugin loading errors. Look for lines mentioning `Inova.ApiPlugin` or `Assembly.LoadFrom`.
+On failure, check `~/SLS4All/Current/logs/default*.log` for plugin-loading errors. Look for lines mentioning `Inova.ApiPlugin` or `Assembly.LoadFrom`.
 
 ## Uninstall
-
-From the clone on the printer:
 
 ```bash
 cd ~/GitHub/Inova-API-Plugin
 ./uninstall.sh
-# then restart the firmware (see above)
+# then restart the firmware
 ```
 
-`uninstall.sh` is the inverse of `install.sh`. It strips the plugin's marker block from `~/SLS4All/Configuration/appsettings.user.toml` and removes `~/SLS4All/Plugins/Inova.ApiPlugin/`. It is idempotent — safe to re-run, and reports `Skipped:` for anything already absent.
-
-If the repo clone is no longer available on the printer (e.g. the user deleted it), the same two operations can be performed by hand:
+Idempotent. Reports `Skipped:` for anything already absent. If the repo clone isn't available, the same operations by hand:
 
 ```bash
-sed -i '/^# >>> Inova.ApiPlugin/,/^# <<< Inova.ApiPlugin/d' \
-    ~/SLS4All/Configuration/appsettings.user.toml
+sed -i '/^# >>> Inova.ApiPlugin/,/^# <<< Inova.ApiPlugin/d' ~/SLS4All/Configuration/appsettings.user.toml
 rm -rf ~/SLS4All/Plugins/Inova.ApiPlugin
 ```
 
-Neither variant restarts the firmware — see the Restart section above.
-
-## Development workflow
-
-1. Edit `InovaApiPlugin.cs` (or add new files in the repo root).
-2. `./build.sh` — rebuilds and refreshes `dist/Inova.ApiPlugin.dll`.
-3. `git commit -am "..."` and `git push`.
-4. On the printer: `cd ~/GitHub/Inova-API-Plugin && git pull && ./install.sh`.
-5. Restart the firmware (see above).
-6. Verify with `curl`.
-
-Iteration is currently ~30 seconds end-to-end after the initial setup.
-
 ## Design notes
 
-- **Own port (5001), not the firmware's port (5000).** The firmware's Kestrel only auto-discovers MVC controllers from the AppCore assembly. Contributing controllers from a plugin assembly would require either patching `StartupBase.cs` to call `AddApplicationPart` for plugin assemblies, or working around the auto-discovery somehow. Running our own `HttpListener` on a side port avoids this entirely and keeps the plugin a zero-firmware-fork solution.
-- **Kestrel + minimal APIs.** The plugin stands up a child `WebApplication` inside its `IHostedService.StartAsync` using `WebApplication.CreateSlimBuilder`, binding Kestrel to port 5001. Endpoints are declared with `app.MapGet`/`MapPost`/etc. The MVP started on `HttpListener` to validate the plugin loader and toolchain end-to-end; once it worked we switched, since `Microsoft.AspNetCore.App` is already in the firmware's runtime (so no DLL cost) and routing + JSON + WebSocket support + DI per handler all become free.
-- **No auth.** The deployed firmware has `[Authorize]` on its own controllers but auth is effectively disabled on this unit (we verified by curling `/api/status` unauthenticated). The plugin matches that — wide open on the LAN. Plan to add auth before exposing this to anything beyond a trusted network.
+- **Own port (5001), not the firmware's port.** Adding our endpoints to the firmware's Kestrel would require patching `StartupBase.cs` to call `AddApplicationPart` for plugin assemblies. Running our own child host on a side port avoids the patch entirely and keeps this plugin a zero-firmware-fork solution.
+- **Kestrel + minimal APIs, via `WebApplication.CreateSlimBuilder`.** `Microsoft.AspNetCore.App` is already in the firmware's runtime, so no extra dependencies. Routing, JSON, WebSocket support, and DI per handler all come for free.
+- **No auth.** Matches the firmware's effective stance on this unit — `[Authorize]` is declared on its controllers but enforcement is disabled. Wide open on the LAN. Add auth before any non-trusted-network exposure.
+- **WebSocket subprotocol gotcha.** The parameterless `ctx.WebSockets.AcceptWebSocketAsync()` overload on ASP.NET Core 10 silently sets `SubProtocol = "default"`, causing the 101 response to carry `Sec-WebSocket-Protocol: default` — which RFC 6455 forbids when the client didn't offer any subprotocol. Strict WS clients (Python `websockets`) reject the connection. Fix is in code: pass `new WebSocketAcceptContext { SubProtocol = null }` explicitly.
 
 ## Related
 
 - [SLS4All.Compact](https://github.com/sls4all/SLS4All.Compact) — the open-source firmware this plugin extends.
-- The bundled `SLS4All.Compact.TestPlugin/` in that repo is the reference implementation showing the plugin loader pattern (`IDelayedConstructable`, `[Application.PluginAssemblies]`, options binding).
+- The bundled `SLS4All.Compact.TestPlugin/` in that repo shows the plugin-loader pattern.

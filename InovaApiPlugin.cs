@@ -134,12 +134,13 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
         var rate = Math.Clamp(hz ?? 10, 1, 100);
         var interval = TimeSpan.FromSeconds(1.0 / rate);
 
-        // Hypothesis: the no-args AcceptWebSocketAsync() was synthesising a
-        // SubProtocol = "default", causing the server to emit
-        // `Sec-WebSocket-Protocol: default` in the 101 response — which RFC 6455
-        // forbids when the client offered no subprotocol. Explicitly pass null
-        // here to test that hypothesis; if the response still carries "default",
-        // the source is deeper in the runtime/middleware, not our call.
+        // The parameterless AcceptWebSocketAsync() overload in ASP.NET Core 10
+        // synthesises SubProtocol = "default" somewhere along the call chain,
+        // causing the 101 response to carry `Sec-WebSocket-Protocol: default`.
+        // RFC 6455 §4.2.2 forbids that header when the client offered no
+        // subprotocol — strict clients (e.g. Python websockets) refuse the
+        // connection. Passing an explicit context with SubProtocol = null
+        // short-circuits the default.
         var acceptContext = new WebSocketAcceptContext { SubProtocol = null };
         using var socket = await ctx.WebSockets.AcceptWebSocketAsync(acceptContext).ConfigureAwait(false);
         var cancel = ctx.RequestAborted;
