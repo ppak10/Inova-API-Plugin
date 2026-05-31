@@ -1,5 +1,7 @@
+using System.Diagnostics;
 using System.Net.WebSockets;
 using System.Text.Json;
+using System.Threading.Channels;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
@@ -110,10 +112,18 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
                 ITemperatureClient temperature)
             => Timed(CaptureSnapshot(movement, lights, power, temperature)));
 
-        // WebSocket stream of combined telemetry. Default 10 Hz, ?hz= overrides
+        // WebSocket stream of combined telemetry. Default 100 Hz, ?hz= overrides
         // (clamped 1..100). Each frame is a JSON object with the same shape as
         // GET /state/snapshot. Loop exits when the client disconnects.
         app.Map("/state/stream", StreamStateAsync);
+
+        // WebSocket stream of high-frequency raw position events from the firmware's
+        // PositionChangedHighFrequency AsyncEvent (~1 kHz native). Use ?hz=N to
+        // decimate to at most N sends/sec (clamped 1..1000). Each frame is
+        // {respondedAt, data: { x, y, z1, z2, r, hasHomed }}. Unlike /state/stream,
+        // this is event-driven, not timer-driven — frames are emitted as the
+        // firmware's internal motion loop publishes them.
+        app.Map("/movement/position/stream", StreamPositionAsync);
     }
 
     private static async Task StreamStateAsync(
@@ -131,7 +141,7 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
             return;
         }
 
-        var rate = Math.Clamp(hz ?? 10, 1, 100);
+        var rate = Math.Clamp(hz ?? 100, 1, 100);
         var interval = TimeSpan.FromSeconds(1.0 / rate);
 
         // The parameterless AcceptWebSocketAsync() overload in ASP.NET Core 10
@@ -163,6 +173,90 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
             }
         }
         catch (OperationCanceledException) { /* client disconnect — normal shutdown path */ }
+    }
+
+    private static async Task StreamPositionAsync(
+        HttpContext ctx,
+        IMovementClient movement,
+        int? hz)
+    {
+        if (!ctx.WebSockets.IsWebSocketRequest)
+        {
+            ctx.Response.StatusCode = StatusCodes.Status400BadRequest;
+            await ctx.Response.WriteAsync("WebSocket upgrade required").ConfigureAwait(false);
+            return;
+        }
+
+        // Same SubProtocol = null workaround as /state/stream — see comment there.
+        var acceptContext = new WebSocketAcceptContext { SubProtocol = null };
+        using var socket = await ctx.WebSockets.AcceptWebSocketAsync(acceptContext).ConfigureAwait(false);
+        var cancel = ctx.RequestAborted;
+
+        // Bounded channel with DropOldest: keep memory bounded and never block the
+        // firmware's emit loop. If the WS client falls behind, older events are
+        // dropped in favour of newer ones — continuous motion still resamples cleanly.
+        var channel = Channel.CreateBounded<PositionHighFrequency>(new BoundedChannelOptions(64)
+        {
+            FullMode = BoundedChannelFullMode.DropOldest,
+            SingleReader = true,
+            SingleWriter = false,
+        });
+
+        // Optional decimation. minIntervalTicks=0 means "send every event the
+        // firmware emits". When ?hz=N is set, skip events that arrive sooner than
+        // 1/N seconds after the last send.
+        var minIntervalTicks = hz.HasValue
+            ? Stopwatch.Frequency / Math.Clamp(hz.Value, 1, 1000)
+            : 0L;
+        long lastSentTicks = 0;
+
+        // Capture as a stable Func so RemoveHandler sees the same delegate identity.
+        Func<PositionHighFrequency, CancellationToken, ValueTask> handler = (arg, _) =>
+        {
+            channel.Writer.TryWrite(arg);
+            return ValueTask.CompletedTask;
+        };
+        movement.PositionChangedHighFrequency.AddHandler(handler);
+
+        try
+        {
+            while (await channel.Reader.WaitToReadAsync(cancel).ConfigureAwait(false))
+            {
+                while (channel.Reader.TryRead(out var ev))
+                {
+                    if (socket.State != WebSocketState.Open) return;
+
+                    if (minIntervalTicks > 0)
+                    {
+                        var now = Stopwatch.GetTimestamp();
+                        if (now - lastSentTicks < minIntervalTicks) continue;
+                        lastSentTicks = now;
+                    }
+
+                    var frame = new
+                    {
+                        respondedAt = DateTimeOffset.UtcNow,
+                        data = new
+                        {
+                            x = ev.Position.X,
+                            y = ev.Position.Y,
+                            z1 = ev.Position.Z1,
+                            z2 = ev.Position.Z2,
+                            r = ev.Position.R,
+                            hasHomed = ev.HasHomed,
+                        },
+                    };
+                    var bytes = JsonSerializer.SerializeToUtf8Bytes(frame, _jsonOptions);
+                    await socket.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, cancel)
+                                .ConfigureAwait(false);
+                }
+            }
+        }
+        catch (OperationCanceledException) { /* client disconnect — normal */ }
+        finally
+        {
+            movement.PositionChangedHighFrequency.RemoveHandler(handler);
+        }
     }
 
     private static object CaptureSnapshot(

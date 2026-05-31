@@ -13,7 +13,8 @@ A plugin for the [SLS4All Compact](https://sls4all.com/) firmware on the Inova M
 | `GET /power/current` | per-output power + powerman state |
 | `GET /temperature/current` | per-sensor temperature entries (no IR matrix) |
 | `GET /state/snapshot` | combined snapshot of all telemetry |
-| `WS /state/stream?hz=N` | periodic snapshots, 1–100 Hz (default 10) |
+| `WS /state/stream?hz=N` | periodic snapshots, 1–100 Hz (default 100) |
+| `WS /movement/position/stream` | event-driven position stream from `PositionChangedHighFrequency` (~1 kHz native). `?hz=N` decimates to ≤N sends/sec (1–1000). Frame shape: `{ respondedAt, data: { x, y, z1, z2, r, hasHomed } }`. |
 
 All data endpoints wrap their payload in `{ respondedAt, data: ... }`. Combined with the per-sample `elapsedFromNow` field where the firmware provides it, clients can reconstruct sub-second wall-clock time for each underlying reading.
 

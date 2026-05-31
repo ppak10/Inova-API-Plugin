@@ -26,6 +26,15 @@ export interface Position {
     r: number;
 }
 
+export interface PositionHighFrequency {
+    x: number;
+    y: number;
+    z1: number;
+    z2: number;
+    r: number;
+    hasHomed: boolean;
+}
+
 export interface LightsState {
     isEnabled: boolean;
     lightCount: number;
@@ -123,14 +132,28 @@ export class InovaClient {
     }
 
     /**
+     * Yields decoded JSON frames from /movement/position/stream. Without `hz`,
+     * the firmware emits at its native ~1 kHz; with `hz`, sends are decimated
+     * server-side (no client-side dropping). Each frame is `Timed<PositionHighFrequency>`.
+     */
+    async *streamPosition(hz?: number): AsyncGenerator<Timed<PositionHighFrequency>> {
+        const path = hz === undefined ? "/movement/position/stream" : `/movement/position/stream?hz=${hz}`;
+        for await (const frame of this.streamWs<PositionHighFrequency>(path)) yield frame;
+    }
+
+    /**
      * Yields decoded JSON frames from /state/stream until the consumer breaks
      * out of the loop or the socket closes. Each frame is `Timed<StateSnapshot>`.
      */
-    async *streamState(hz = 10): AsyncGenerator<Timed<StateSnapshot>> {
+    async *streamState(hz = 100): AsyncGenerator<Timed<StateSnapshot>> {
+        for await (const frame of this.streamWs<StateSnapshot>(`/state/stream?hz=${hz}`)) yield frame;
+    }
+
+    private async *streamWs<T>(path: string): AsyncGenerator<Timed<T>> {
         const wsUrl = this.baseUrl
             .replace(/^http:\/\//, "ws://")
             .replace(/^https:\/\//, "wss://");
-        const ws = new WebSocket(`${wsUrl}/state/stream?hz=${hz}`);
+        const ws = new WebSocket(`${wsUrl}${path}`);
 
         // Bridge the event-based WebSocket to an async iterator via a queue.
         const queue: string[] = [];
@@ -148,7 +171,6 @@ export class InovaClient {
         ws.on("error", (err) => { closeReason.value = err; closed = true; waiters.forEach(w => w(null)); waiters.length = 0; });
 
         try {
-            // Wait until socket is open before yielding.
             await new Promise<void>((resolve, reject) => {
                 ws.once("open", () => resolve());
                 ws.once("error", reject);
@@ -157,7 +179,7 @@ export class InovaClient {
             while (!closed) {
                 const text = queue.shift() ?? await new Promise<string | null>(r => waiters.push(r));
                 if (text === null) break;
-                yield JSON.parse(text) as Timed<StateSnapshot>;
+                yield JSON.parse(text) as Timed<T>;
             }
             if (closeReason.value) throw closeReason.value;
         } finally {
