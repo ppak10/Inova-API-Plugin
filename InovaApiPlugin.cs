@@ -134,7 +134,14 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
         var rate = Math.Clamp(hz ?? 10, 1, 100);
         var interval = TimeSpan.FromSeconds(1.0 / rate);
 
-        using var socket = await ctx.WebSockets.AcceptWebSocketAsync().ConfigureAwait(false);
+        // Hypothesis: the no-args AcceptWebSocketAsync() was synthesising a
+        // SubProtocol = "default", causing the server to emit
+        // `Sec-WebSocket-Protocol: default` in the 101 response — which RFC 6455
+        // forbids when the client offered no subprotocol. Explicitly pass null
+        // here to test that hypothesis; if the response still carries "default",
+        // the source is deeper in the runtime/middleware, not our call.
+        var acceptContext = new WebSocketAcceptContext { SubProtocol = null };
+        using var socket = await ctx.WebSockets.AcceptWebSocketAsync(acceptContext).ConfigureAwait(false);
         var cancel = ctx.RequestAborted;
         using var timer = new PeriodicTimer(interval);
 
