@@ -10,8 +10,19 @@
 
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
-    <ProjectReference Include="..\SLS4All.Compact\SLS4All.Compact\SLS4All.Compact.csproj" />
-    <ProjectReference Include="..\SLS4All.Compact\SLS4All.Compact.Core\SLS4All.Compact.Core.csproj" />
+    <!-- Reference deployed firmware DLLs directly (pulled from the printer via
+         scp into refs/) so our compiled IL matches the runtime ABI exactly.
+         The submodule sources can lag the deployed firmware; binding to them
+         caused MissingMethodException at runtime (e.g. AsyncEvent.AddHandler
+         changed return type from void to DisposableHelper between commits). -->
+    <Reference Include="SLS4All.Compact">
+      <HintPath>refs\SLS4All.Compact.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="SLS4All.Compact.Core">
+      <HintPath>refs\SLS4All.Compact.Core.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 
 </Project>
