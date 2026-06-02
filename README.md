@@ -12,6 +12,8 @@ A plugin for the [SLS4All Compact](https://sls4all.com/) firmware on the Inova M
 | `GET /lights/state` | `{ isEnabled, lightCount }` |
 | `GET /power/current` | per-output power + powerman state |
 | `GET /temperature/current` | per-sensor temperature entries (no IR matrix) |
+| `GET /temperature/bedmatrix` | raw IR thermal pixel matrix: `{ timestamp, width, height, values: float[] }`. `data` is `null` if no camera or no frame yet. |
+| `WS /temperature/bedmatrix/stream` | event-driven matrix stream from `StateChangedHighFrequency` (~6 Hz native). `?hz=N` decimates (1–60). Frames with no matrix are skipped. |
 | `GET /state/snapshot` | combined snapshot of all telemetry |
 | `WS /state/stream?hz=N` | periodic snapshots, 1–100 Hz (default 100) |
 | `WS /movement/position/stream` | event-driven position stream from `PositionChangedHighFrequency` (~1 kHz native). `?hz=N` decimates to ≤N sends/sec (1–1000). Frame shape: `{ respondedAt, data: { x, y, z1, z2, r, hasHomed } }`. |

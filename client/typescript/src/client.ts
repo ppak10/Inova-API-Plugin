@@ -72,6 +72,13 @@ export interface TemperatureState {
     entries: TemperatureEntry[];
 }
 
+export interface TemperatureMatrix {
+    timestamp: SystemTimestamp;
+    width: number;
+    height: number;
+    values: number[];
+}
+
 export interface StateSnapshot {
     position: Position;
     lights: LightsState;
@@ -127,6 +134,10 @@ export class InovaClient {
         return this.getJson<Timed<TemperatureState>>("/temperature/current");
     }
 
+    bedMatrix(): Promise<Timed<TemperatureMatrix | null>> {
+        return this.getJson<Timed<TemperatureMatrix | null>>("/temperature/bedmatrix");
+    }
+
     stateSnapshot(): Promise<Timed<StateSnapshot>> {
         return this.getJson<Timed<StateSnapshot>>("/state/snapshot");
     }
@@ -139,6 +150,17 @@ export class InovaClient {
     async *streamPosition(hz?: number): AsyncGenerator<Timed<PositionHighFrequency>> {
         const path = hz === undefined ? "/movement/position/stream" : `/movement/position/stream?hz=${hz}`;
         for await (const frame of this.streamWs<PositionHighFrequency>(path)) yield frame;
+    }
+
+    /**
+     * Yields decoded JSON frames from /temperature/bedmatrix/stream. The thermal
+     * camera reports at ~6 Hz natively; `hz` decimates further (clamped 1..60).
+     * Each frame is `Timed<TemperatureMatrix>` — frames with a null BedMatrix
+     * are dropped server-side and never yielded.
+     */
+    async *streamBedMatrix(hz?: number): AsyncGenerator<Timed<TemperatureMatrix>> {
+        const path = hz === undefined ? "/temperature/bedmatrix/stream" : `/temperature/bedmatrix/stream?hz=${hz}`;
+        for await (const frame of this.streamWs<TemperatureMatrix>(path)) yield frame;
     }
 
     /**

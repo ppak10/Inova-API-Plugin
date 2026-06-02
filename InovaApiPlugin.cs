@@ -99,9 +99,16 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
 
         // TemperatureState includes BedMatrix (IR thermal pixels, ~50 KB) we don't
         // want to ship over JSON on every poll. Use /api/bedmatrix/image/... for
-        // the rendered thermal heatmap (existing firmware endpoint on port 80).
+        // the rendered thermal heatmap (existing firmware endpoint on port 80),
+        // or /temperature/bedmatrix below for the raw float matrix.
         app.MapGet("/temperature/current", (ITemperatureClient temperature)
             => Timed(new { entries = temperature.CurrentState.Entries }));
+
+        // Raw IR thermal pixel matrix as float32 values. Width/Height come from
+        // the underlying ITemperatureCamera. Returns data:null when no matrix is
+        // currently available (no thermal camera or not yet sampled).
+        app.MapGet("/temperature/bedmatrix", (ITemperatureClient temperature)
+            => Timed(temperature.CurrentState.BedMatrix));
 
         // Combined snapshot of all Tier 1 telemetry. Same shape as the per-frame
         // payload of the /state/stream WebSocket, but as a one-shot HTTP GET.
@@ -124,6 +131,13 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
         // this is event-driven, not timer-driven — frames are emitted as the
         // firmware's internal motion loop publishes them.
         app.Map("/movement/position/stream", StreamPositionAsync);
+
+        // WebSocket stream of raw IR thermal matrix frames, subscribed to the
+        // firmware's StateChangedHighFrequency event (~6 Hz native, camera-bound).
+        // Use ?hz=N to decimate (clamped 1..60). Each frame is
+        // {respondedAt, data: { timestamp, width, height, values }}.
+        // Events without a BedMatrix (null on the TemperatureState) are skipped.
+        app.Map("/temperature/bedmatrix/stream", StreamBedMatrixAsync);
     }
 
     private static async Task StreamStateAsync(
@@ -256,6 +270,79 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
         finally
         {
             movement.PositionChangedHighFrequency.RemoveHandler(handler);
+        }
+    }
+
+    private static async Task StreamBedMatrixAsync(
+        HttpContext ctx,
+        ITemperatureClient temperature,
+        int? hz)
+    {
+        if (!ctx.WebSockets.IsWebSocketRequest)
+        {
+            ctx.Response.StatusCode = StatusCodes.Status400BadRequest;
+            await ctx.Response.WriteAsync("WebSocket upgrade required").ConfigureAwait(false);
+            return;
+        }
+
+        var acceptContext = new WebSocketAcceptContext { SubProtocol = null };
+        using var socket = await ctx.WebSockets.AcceptWebSocketAsync(acceptContext).ConfigureAwait(false);
+        var cancel = ctx.RequestAborted;
+
+        // Capacity 8 — these frames are large (~50 KB JSON); we never want to
+        // buffer multiple. DropOldest keeps the freshest frame available.
+        var channel = Channel.CreateBounded<TemperatureMatrix>(new BoundedChannelOptions(8)
+        {
+            FullMode = BoundedChannelFullMode.DropOldest,
+            SingleReader = true,
+            SingleWriter = false,
+        });
+
+        // The thermal camera reports at ~6 Hz natively, so the upper hz clamp is
+        // 60 — well above what the underlying hardware can produce.
+        var minIntervalTicks = hz.HasValue
+            ? Stopwatch.Frequency / Math.Clamp(hz.Value, 1, 60)
+            : 0L;
+        long lastSentTicks = 0;
+
+        Func<TemperatureState, CancellationToken, ValueTask> handler = (state, _) =>
+        {
+            if (state.BedMatrix is not null)
+                channel.Writer.TryWrite(state.BedMatrix);
+            return ValueTask.CompletedTask;
+        };
+        temperature.StateChangedHighFrequency.AddHandler(handler);
+
+        try
+        {
+            while (await channel.Reader.WaitToReadAsync(cancel).ConfigureAwait(false))
+            {
+                while (channel.Reader.TryRead(out var matrix))
+                {
+                    if (socket.State != WebSocketState.Open) return;
+
+                    if (minIntervalTicks > 0)
+                    {
+                        var now = Stopwatch.GetTimestamp();
+                        if (now - lastSentTicks < minIntervalTicks) continue;
+                        lastSentTicks = now;
+                    }
+
+                    var frame = new
+                    {
+                        respondedAt = DateTimeOffset.UtcNow,
+                        data = matrix,
+                    };
+                    var bytes = JsonSerializer.SerializeToUtf8Bytes(frame, _jsonOptions);
+                    await socket.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, cancel)
+                                .ConfigureAwait(false);
+                }
+            }
+        }
+        catch (OperationCanceledException) { /* client disconnect — normal */ }
+        finally
+        {
+            temperature.StateChangedHighFrequency.RemoveHandler(handler);
         }
     }
 
