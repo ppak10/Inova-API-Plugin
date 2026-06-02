@@ -52,6 +52,7 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
         Forward<ITemperatureClient>(builder.Services);
 
         _app = builder.Build();
+        _app.UseDeveloperExceptionPage(); // surface child-Kestrel exceptions in 500 response body
         _app.UseWebSockets();
         MapEndpoints(_app, _startedAt);
 
@@ -130,14 +131,14 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
         // {respondedAt, data: { x, y, z1, z2, r, hasHomed }}. Unlike /state/stream,
         // this is event-driven, not timer-driven — frames are emitted as the
         // firmware's internal motion loop publishes them.
-        app.Map("/movement/position/stream", StreamPositionAsync);
+        app.MapGet("/movement/position/stream", StreamPositionAsync);
 
         // WebSocket stream of raw IR thermal matrix frames, subscribed to the
         // firmware's StateChangedHighFrequency event (~6 Hz native, camera-bound).
         // Use ?hz=N to decimate (clamped 1..60). Each frame is
         // {respondedAt, data: { timestamp, width, height, values }}.
         // Events without a BedMatrix (null on the TemperatureState) are skipped.
-        app.Map("/temperature/bedmatrix/stream", StreamBedMatrixAsync);
+        app.MapGet("/temperature/bedmatrix/stream", StreamBedMatrixAsync);
     }
 
     private static async Task StreamStateAsync(
