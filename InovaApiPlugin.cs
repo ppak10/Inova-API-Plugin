@@ -226,10 +226,12 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
         long lastSentTicks = 0;
 
         // Capture as a stable Func so RemoveHandler sees the same delegate identity.
-        Func<PositionHighFrequency, CancellationToken, ValueTask> handler = (arg, _) =>
+        // Use the Task overload of AddHandler — the ValueTask overload may not exist
+        // on older firmware builds that the plugin gets loaded into.
+        Func<PositionHighFrequency, CancellationToken, Task> handler = (arg, _) =>
         {
             channel.Writer.TryWrite(arg);
-            return ValueTask.CompletedTask;
+            return Task.CompletedTask;
         };
         movement.PositionChangedHighFrequency.AddHandler(handler);
 
@@ -306,11 +308,12 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
             : 0L;
         long lastSentTicks = 0;
 
-        Func<TemperatureState, CancellationToken, ValueTask> handler = (state, _) =>
+        // See StreamPositionAsync for why we use the Task overload here.
+        Func<TemperatureState, CancellationToken, Task> handler = (state, _) =>
         {
             if (state.BedMatrix is not null)
                 channel.Writer.TryWrite(state.BedMatrix);
-            return ValueTask.CompletedTask;
+            return Task.CompletedTask;
         };
         temperature.StateChangedHighFrequency.AddHandler(handler);
 
