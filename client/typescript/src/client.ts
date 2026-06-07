@@ -79,6 +79,21 @@ export interface TemperatureMatrix {
     values: number[];
 }
 
+export interface PlotterInfo {
+    width: number;
+    height: number;
+    version: number;
+    layerCount: number;
+    isEmpty: boolean;
+}
+
+export interface PlotterMask {
+    width: number;
+    height: number;
+    version: number;
+    values: number[];
+}
+
 export interface StateSnapshot {
     position: Position;
     lights: LightsState;
@@ -136,6 +151,14 @@ export class InovaClient {
 
     bedMatrix(): Promise<Timed<TemperatureMatrix | null>> {
         return this.getJson<Timed<TemperatureMatrix | null>>("/temperature/bedmatrix");
+    }
+
+    plotterInfo(): Promise<Timed<PlotterInfo>> {
+        return this.getJson<Timed<PlotterInfo>>("/plotter/info");
+    }
+
+    plotterMask(): Promise<Timed<PlotterMask>> {
+        return this.getJson<Timed<PlotterMask>>("/plotter/mask");
     }
 
     stateSnapshot(): Promise<Timed<StateSnapshot>> {

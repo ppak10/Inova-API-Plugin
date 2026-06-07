@@ -11,6 +11,7 @@ using Microsoft.Extensions.Logging;
 using SLS4All.Compact.Helpers;
 using SLS4All.Compact.Movement;
 using SLS4All.Compact.Power;
+using SLS4All.Compact.Slicing;
 using SLS4All.Compact.Temperature;
 
 namespace Inova.ApiPlugin;
@@ -50,6 +51,12 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
         Forward<ILightsClient>(builder.Services);
         Forward<IPowerClient>(builder.Services);
         Forward<ITemperatureClient>(builder.Services);
+        Forward<ICodePlotter>(builder.Services);
+        // The plugin's PluginReplacements registration substitutes ICodePlotter
+        // with LoggingCodePlotter. The parent container holds the LoggingCodePlotter
+        // singleton under both keys; forwarding it under its concrete type lets
+        // the new /plotter endpoints access decorator-specific APIs.
+        Forward<LoggingCodePlotter>(builder.Services);
 
         _app = builder.Build();
         _app.UseDeveloperExceptionPage(); // surface child-Kestrel exceptions in 500 response body
@@ -110,6 +117,70 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
         // currently available (no thermal camera or not yet sampled).
         app.MapGet("/temperature/bedmatrix", (ITemperatureClient temperature)
             => Timed(temperature.CurrentState.BedMatrix));
+
+        // ICodePlotter — accumulates the laser exposure mask for the current
+        // layer as raster commands stream through the firmware. This is the
+        // authoritative "where has the laser been" source; CurrentPosition.X/Y
+        // do NOT track raster moves. Version increments as the plotter receives
+        // new commands. currentLayer / currentCmdIdx / buildEpoch come from the
+        // LoggingCodePlotter decorator; clients use them to seed the command
+        // backfill query (/plotter/layer/{n}/commands?since=…) and detect
+        // plugin restarts (buildEpoch changes when Clear(beginPrint=true) fires).
+        app.MapGet("/plotter/info", (ICodePlotter plotter, LoggingCodePlotter logger, IMovementClient movement) =>
+        {
+            var s = logger.GetState();
+            return Timed(new
+            {
+                width = plotter.Width,
+                height = plotter.Height,
+                version = plotter.Version,
+                layerCount = plotter.LayerCount,
+                isEmpty = plotter.IsEmpty,
+                currentLayer = s.CurrentLayer,
+                currentCmdIdx = s.CurrentCmdIdx,
+                buildEpoch = s.BuildEpoch,
+                maxXY = movement.MaxXY,
+            });
+        });
+
+        // Full mask as float[]. Length = width * height. Polling cadence is up
+        // to the client — version field lets the client skip refetches when
+        // nothing has changed. Caller-supplied buffer is created fresh per
+        // request; firmware reuses internal buffers across calls.
+        app.MapGet("/plotter/mask", (ICodePlotter plotter) =>
+        {
+            float[] buffer = null!;
+            var (w, h) = plotter.GetMask(ref buffer);
+            return Timed(new
+            {
+                width = w,
+                height = h,
+                version = plotter.Version,
+                values = buffer,
+            });
+        });
+
+        // Per-layer command backfill. Returns a slice of the LoggingCodePlotter's
+        // in-memory ring buffer from sinceIdx onward. Used by clients joining
+        // mid-print to seed their canvas before subscribing to the WS stream.
+        // Layers are retained LRU (default 8); requests for evicted layers
+        // return an empty list — clients should fall back to the Postgres
+        // backfill route on the recorder (/api/builds/{id}/plotter/commands).
+        app.MapGet("/plotter/layer/{idx:int}/commands", (int idx, int? since, LoggingCodePlotter logger) =>
+            Timed(new
+            {
+                layer = idx,
+                sinceCmdIdx = since ?? 0,
+                commands = logger.SnapshotLayer(idx, since ?? 0),
+            }));
+
+        // WebSocket stream of LoggingCodePlotter command frames. Subscribes
+        // to the decorator's fan-out; each Process(CodeCommand) call emits one
+        // frame here. Bounded channel cap 1024 with DropOldest — slow clients
+        // lose middle-history but the GET-layer backfill above lets them
+        // recover. Frame: {respondedAt, data: {buildEpoch, layer, idx, ts,
+        // op, x, y, laser, speed, raw}}.
+        app.MapGet("/plotter/commands/stream", StreamPlotterCommandsAsync);
 
         // Combined snapshot of all Tier 1 telemetry. Same shape as the per-frame
         // payload of the /state/stream WebSocket, but as a one-shot HTTP GET.
@@ -273,6 +344,78 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
         finally
         {
             movement.PositionChangedHighFrequency.RemoveHandler(handler);
+        }
+    }
+
+    private static async Task StreamPlotterCommandsAsync(
+        HttpContext ctx,
+        LoggingCodePlotter plotterLogger,
+        int? hz)
+    {
+        if (!ctx.WebSockets.IsWebSocketRequest)
+        {
+            ctx.Response.StatusCode = StatusCodes.Status400BadRequest;
+            await ctx.Response.WriteAsync("WebSocket upgrade required").ConfigureAwait(false);
+            return;
+        }
+
+        // Same SubProtocol = null workaround as /state/stream — see comment there.
+        var acceptContext = new WebSocketAcceptContext { SubProtocol = null };
+        using var socket = await ctx.WebSockets.AcceptWebSocketAsync(acceptContext).ConfigureAwait(false);
+        var cancel = ctx.RequestAborted;
+
+        // Bounded channel, DropOldest. Commands can burst much higher than the
+        // ~1 kHz position stream (a single layer can emit tens of thousands of
+        // MOVE_XY calls); cap 1024 + drop policy means slow WS clients lose
+        // middle history but the GET /plotter/layer/{n}/commands?since=… backfill
+        // lets the dashboard recover without firmware-side state.
+        var channel = Channel.CreateBounded<CommandFrame>(new BoundedChannelOptions(1024)
+        {
+            FullMode = BoundedChannelFullMode.DropOldest,
+            SingleReader = true,
+            SingleWriter = false,
+        });
+
+        // Optional decimation, mirrors StreamPositionAsync. Default 0 = pass
+        // every command. Clamp 1..1000 — past that, downsample via the GET
+        // backfill query instead.
+        var minIntervalTicks = hz.HasValue
+            ? Stopwatch.Frequency / Math.Clamp(hz.Value, 1, 1000)
+            : 0L;
+        long lastSentTicks = 0;
+
+        plotterLogger.AddSubscriber(channel.Writer);
+
+        try
+        {
+            while (await channel.Reader.WaitToReadAsync(cancel).ConfigureAwait(false))
+            {
+                while (channel.Reader.TryRead(out var cmd))
+                {
+                    if (socket.State != WebSocketState.Open) return;
+
+                    if (minIntervalTicks > 0)
+                    {
+                        var now = Stopwatch.GetTimestamp();
+                        if (now - lastSentTicks < minIntervalTicks) continue;
+                        lastSentTicks = now;
+                    }
+
+                    var frame = new
+                    {
+                        respondedAt = DateTimeOffset.UtcNow,
+                        data = cmd,
+                    };
+                    var bytes = JsonSerializer.SerializeToUtf8Bytes(frame, _jsonOptions);
+                    await socket.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, cancel)
+                                .ConfigureAwait(false);
+                }
+            }
+        }
+        catch (OperationCanceledException) { /* client disconnect — normal */ }
+        finally
+        {
+            plotterLogger.RemoveSubscriber(channel.Writer);
         }
     }
 

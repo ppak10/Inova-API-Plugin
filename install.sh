@@ -74,12 +74,53 @@ ${MARKER_BEGIN}
 Implementation = "${PLUGIN_TYPE}, ${PLUGIN_NAME}"
 Registration = "AsImplementationAndInterfaces"
 Lifetime = "Singleton"
+
+# Substitute the firmware's closed-source ImageCodePlotter with our
+# LoggingCodePlotter decorator. The decorator forwards every ICodePlotter call
+# to the original (constructed reflectively at startup) and additionally tees
+# Process(CodeCommand) into a fan-out + per-layer ring buffer, exposed via the
+# /plotter/commands/stream WS and /plotter/layer/{n}/commands GET.
+# See CompactServiceCollectionExtensions.cs:115 for how this is applied.
+[Application.PluginReplacements."Inova.LoggingCodePlotter"]
+Original = "SLS4All.Compact.Slicing.ImageCodePlotter, SLS4All.Compact.Slicing"
+Replacement = "Inova.ApiPlugin.LoggingCodePlotter, ${PLUGIN_NAME}"
 ${MARKER_END}
 EOF
 
 mv "${TMP_CONFIG}" "${USER_CONFIG}"
 trap - EXIT
 echo "Updated:   ${USER_CONFIG}"
+
+echo ""
+
+# --- 3. Probe for ImageCodePlotter assembly ---
+# The PluginReplacements config above pins SLS4All.Compact.Slicing.ImageCodePlotter
+# in SLS4All.Compact.Slicing.dll. If that assembly name drifts in a future
+# firmware release the decorator's AppDomain-scan fallback should still find it,
+# but flagging mismatches here at install time is cheaper than debugging at boot.
+PROBE_DIRS=(
+    "${SLS4ALL_HOME}/Bin"
+    "${SLS4ALL_HOME}/Current"
+    "${SLS4ALL_HOME}/Current/SLS4All.Compact.PrinterApp"
+)
+PROBE_HITS=""
+for dir in "${PROBE_DIRS[@]}"; do
+    if [[ -d "${dir}" ]]; then
+        hits=$(grep -l -r --include="*.dll" "ImageCodePlotter" "${dir}" 2>/dev/null | head -5 || true)
+        if [[ -n "${hits}" ]]; then
+            PROBE_HITS="${PROBE_HITS}${hits}\n"
+        fi
+    fi
+done
+
+if [[ -n "${PROBE_HITS}" ]]; then
+    echo "ImageCodePlotter candidates (verify the AQN in the [PluginReplacements] block above):"
+    printf "  %s\n" $(echo -e "${PROBE_HITS}")
+else
+    echo "WARNING: could not locate ImageCodePlotter in any standard firmware directory."
+    echo "         If the firmware fails to load LoggingCodePlotter at startup,"
+    echo "         check ~/SLS4All/Current/logs/default*.log for AQN resolution errors."
+fi
 
 echo ""
 echo "Plugin installed. Restart the SLS4All service for changes to take effect."
