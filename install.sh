@@ -82,7 +82,7 @@ Lifetime = "Singleton"
 # /plotter/commands/stream WS and /plotter/layer/{n}/commands GET.
 # See CompactServiceCollectionExtensions.cs:115 for how this is applied.
 [Application.PluginReplacements."Inova.LoggingCodePlotter"]
-Original = "SLS4All.Compact.Slicing.ImageCodePlotter, SLS4All.Compact.Slicing"
+Original = "SLS4All.Compact.Slicing.ImageCodePlotter, SLS4All.Compact.Processing"
 Replacement = "Inova.ApiPlugin.LoggingCodePlotter, ${PLUGIN_NAME}"
 ${MARKER_END}
 EOF

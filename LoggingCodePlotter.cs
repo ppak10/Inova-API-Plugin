@@ -24,8 +24,11 @@ public sealed class LoggingCodePlotter : ICodePlotter
     // AQN of the firmware's real plotter. Verified via install.sh probe; if
     // it drifts in a future firmware release, AppDomain scan picks up the new
     // location automatically.
+    // The type's namespace (SLS4All.Compact.Slicing) does not match its
+    // assembly (SLS4All.Compact.Processing) — verified by metadata probe
+    // against the deployed Inova firmware DLLs (2026-06).
     private const string ImageCodePlotterAQN =
-        "SLS4All.Compact.Slicing.ImageCodePlotter, SLS4All.Compact.Slicing";
+        "SLS4All.Compact.Slicing.ImageCodePlotter, SLS4All.Compact.Processing";
 
     // Per-layer command history. Capped per-layer so a single dense layer
     // can't OOM us; LRU evicted across layers so a long print doesn't either.
