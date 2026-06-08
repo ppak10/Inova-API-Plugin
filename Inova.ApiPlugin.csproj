@@ -23,6 +23,17 @@
       <HintPath>refs\SLS4All.Compact.Core.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- McuClient + McuClient.Core: pulled from the printer so the plugin can
+         subclass McuMovementClient and intercept MoveXY/SetLaser. Same
+         deployed-ABI-matching pattern as the Compact refs above. -->
+    <Reference Include="SLS4All.Compact.McuClient">
+      <HintPath>refs\SLS4All.Compact.McuClient.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="SLS4All.Compact.McuClient.Core">
+      <HintPath>refs\SLS4All.Compact.McuClient.Core.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 
 </Project>

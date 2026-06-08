@@ -169,7 +169,21 @@ public sealed class LoggingCodePlotter : ICodePlotter
         // check. ImageCodePlotter handles its own concurrency.
         _inner.Process(cmd);
 
+        // Slicer doesn't actually use this path on the deployed firmware — it
+        // uses ICodePlotter via a separately-constructed instance inside
+        // SLS4All.Compact.Printing.dll, bypassing the DI singleton. Kept here
+        // for completeness in case future firmware revisions reroute. Real
+        // command capture happens in LoggingMovementClient via Emit() below.
         var (op, x, y, laser, speed, raw) = ParseCommand(cmd);
+        Emit(op, x, y, laser, speed, raw);
+    }
+
+    // Public emit path used by LoggingMovementClient when intercepting
+    // MoveXY/SetLaser. Bumps cmd_idx atomically, detects layer rollover by
+    // polling the inner plotter's LayerCount, appends to the per-layer ring
+    // buffer, and fans out to all subscribed WS clients.
+    public void Emit(string op, float? x, float? y, float? laser, float? speed, string? raw)
+    {
         var layerCount = _inner.LayerCount;
 
         int layer, idx;

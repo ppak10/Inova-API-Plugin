@@ -84,6 +84,15 @@ Lifetime = "Singleton"
 [Application.PluginReplacements."Inova.LoggingCodePlotter"]
 Original = "SLS4All.Compact.Slicing.ImageCodePlotter, SLS4All.Compact.Processing"
 Replacement = "Inova.ApiPlugin.LoggingCodePlotter, ${PLUGIN_NAME}"
+
+# Subclass McuMovementClient to intercept MoveXY/SetLaser. This is where
+# per-vector galvo data is actually visible — the slicer goes through
+# IMovementClient for hardware MCU access, but bypasses the DI ICodePlotter
+# for per-command writes. The intercepted frames flow into LoggingCodePlotter's
+# fan-out (so the same /plotter/commands/stream WS receives them).
+[Application.PluginReplacements."Inova.LoggingMovementClient"]
+Original = "SLS4All.Compact.Movement.McuMovementClient, SLS4All.Compact.McuClient"
+Replacement = "Inova.ApiPlugin.LoggingMovementClient, ${PLUGIN_NAME}"
 ${MARKER_END}
 EOF
 
