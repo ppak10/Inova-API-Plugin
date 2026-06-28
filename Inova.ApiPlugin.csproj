@@ -23,6 +23,13 @@
       <HintPath>refs\SLS4All.Compact.Core.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- SLS4All.Compact.Printing: home of IPrintingService and the
+         GetPrintingObjectStates / IsExcludedObject / ExcludeObject methods.
+         Source for /printing/objects and POST /printing/objects/{id}/exclude. -->
+    <Reference Include="SLS4All.Compact.Printing">
+      <HintPath>refs\SLS4All.Compact.Printing.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <!-- McuClient + McuClient.Core: pulled from the printer so the plugin can
          subclass McuMovementClient and intercept MoveXY/SetLaser. Same
          deployed-ABI-matching pattern as the Compact refs above. -->

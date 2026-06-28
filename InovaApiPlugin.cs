@@ -8,9 +8,12 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using SLS4All.Compact.Graphics;
 using SLS4All.Compact.Helpers;
 using SLS4All.Compact.Movement;
+using SLS4All.Compact.Nesting;
 using SLS4All.Compact.Power;
+using SLS4All.Compact.Printing;
 using SLS4All.Compact.Slicing;
 using SLS4All.Compact.Temperature;
 
@@ -57,6 +60,15 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
         // singleton under both keys; forwarding it under its concrete type lets
         // the new /plotter endpoints access decorator-specific APIs.
         Forward<LoggingCodePlotter>(builder.Services);
+        // INestingService holds the live in-memory nesting state for the current
+        // job (instance list + transforms + bounds). Source for /job/current/parts.
+        Forward<INestingService>(builder.Services);
+        // IPrintingService is the *during-print* source: GetPrintingObjectStates()
+        // returns one PrintingObjectState per object actively being printed
+        // (id, name, hash, transform, isExcluded), and ExcludeObject(id, bool)
+        // is the mid-print include/exclude knob. The id matches the plotter's
+        // CodePlotterMarkedObject.Id, so dashboard overlays correlate directly.
+        Forward<IPrintingService>(builder.Services);
 
         _app = builder.Build();
         _app.UseDeveloperExceptionPage(); // surface child-Kestrel exceptions in 500 response body
@@ -181,6 +193,139 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
         // recover. Frame: {respondedAt, data: {buildEpoch, layer, idx, ts,
         // op, x, y, laser, speed, raw}}.
         app.MapGet("/plotter/commands/stream", StreamPlotterCommandsAsync);
+
+        // Per-object markers for the current layer as the plotter sees them.
+        // Each entry is {id, outline}; outline is a polygon in plotter raster
+        // coordinates (origin top-left, units = plotter pixels — divide by
+        // (width, height) and multiply by chamber size to get mm). The id is
+        // an opaque integer the plotter assigns per print; pair it with
+        // /plotter/objects/{id}/mask.png to fetch a per-object raster, and
+        // with /job/current/parts to recover human-readable names (the link
+        // is by emission order — first marked object = first nested instance).
+        app.MapGet("/plotter/objects", (ICodePlotter plotter) =>
+        {
+            var objs = plotter.GetMarkedObjects();
+            return Timed(new
+            {
+                version = plotter.Version,
+                width = plotter.Width,
+                height = plotter.Height,
+                objects = objs.Select(o => new
+                {
+                    id = o.Id,
+                    outline = o.RelativeOutline.Select(v => new[] { v.X, v.Y }).ToArray(),
+                }).ToArray(),
+            });
+        });
+
+        // PNG mask of a single marked object on the current layer. White-on-
+        // transparent by default; pass ?on=RRGGBBAA and ?off=RRGGBBAA (8-hex-
+        // digit RGBA) to override. Returns 404 if the id isn't present in the
+        // current layer (e.g. object not yet emitted, or evicted by a Clear).
+        app.MapGet("/plotter/objects/{id:int}/mask.png", (
+            int id, string? on, string? off, ICodePlotter plotter) =>
+        {
+            var onColor = ParseRgba(on) ?? new RgbaB(255, 255, 255, 255);
+            var offColor = ParseRgba(off) ?? new RgbaB(0, 0, 0, 0);
+            var mask = plotter.CreateMarkedObjectMask(id, onColor, offColor);
+            if (mask.IsEmpty) return Results.NotFound();
+            return Results.Bytes(mask.Data.ToArray(), mask.ContentType ?? "image/png");
+        });
+
+        // Projection of INestingService.GetInstances() — the live in-memory
+        // nesting state for the current job. Each instance carries the part
+        // name (STL filename), mesh content hash, axis-aligned bounds, place-
+        // ment transform (position + rotation/quaternion + scale), and the
+        // firmware-assigned RGBA color. Use the chamber.size{X,Y,Z} to scale
+        // a 2D top-down view. This is the right source for a parts-list card
+        // because it includes names (the plotter's marked objects don't).
+        app.MapGet("/job/current/parts", (INestingService nesting) =>
+        {
+            var instances = nesting.GetInstances();
+            var dim = nesting.NestingDim;
+            return Timed(new
+            {
+                chamber = dim is null ? null : new
+                {
+                    sizeX = dim.SizeX,
+                    sizeY = dim.SizeY,
+                    sizeZ = dim.SizeZ,
+                },
+                chamberStep = nesting.ChamberStep,
+                instances = instances.Select(i =>
+                {
+                    var t = i.TransformState;
+                    var b = i.Mesh;
+                    return new
+                    {
+                        index = i.Index,
+                        name = i.Name,
+                        meshHash = b?.Hash,
+                        bounds = b is null ? null : new
+                        {
+                            center = new[] { b.Bounds.Center.X, b.Bounds.Center.Y, b.Bounds.Center.Z },
+                            size = new[] { b.Bounds.Size.X, b.Bounds.Size.Y, b.Bounds.Size.Z },
+                        },
+                        transform = new
+                        {
+                            position = new[] { t.Position.X, t.Position.Y, t.Position.Z },
+                            rotation = new[] { t.Rotation.X, t.Rotation.Y, t.Rotation.Z },
+                            quaternion = new[] { t.Quaternion.X, t.Quaternion.Y, t.Quaternion.Z, t.Quaternion.W },
+                            scale = new[] { t.Scale.X, t.Scale.Y, t.Scale.Z },
+                        },
+                        color = new { r = i.Color.R, g = i.Color.G, b = i.Color.B, a = i.Color.A },
+                        isOverlapping = i.IsOverlapping,
+                        inset = i.Inset,
+                        margin = i.Margin,
+                        nestingPriority = i.NestingPriority,
+                    };
+                }).ToArray(),
+            });
+        });
+
+        // Live per-object state during an active print. Each entry corresponds
+        // to one printing object the slicer/plotter is aware of: id (int, the
+        // same number used by /plotter/objects), name (STL filename), mesh
+        // hash, world-space 4x4 transform (row-major), and the current
+        // isExcluded flag. Returns an empty list when no print is active.
+        app.MapGet("/printing/objects", (IPrintingService printing) =>
+        {
+            var states = printing.GetPrintingObjectStates() ?? Array.Empty<PrintingObjectState>();
+            return Timed(new
+            {
+                objects = states.Select(s =>
+                {
+                    var o = s.Object;
+                    var m = o.Transform;
+                    return new
+                    {
+                        id = o.Id,
+                        name = o.Name,
+                        hash = o.Hash,
+                        transform = new[]
+                        {
+                            new[] { m.M11, m.M12, m.M13, m.M14 },
+                            new[] { m.M21, m.M22, m.M23, m.M24 },
+                            new[] { m.M31, m.M32, m.M33, m.M34 },
+                            new[] { m.M41, m.M42, m.M43, m.M44 },
+                        },
+                        isExcluded = s.IsExcluded,
+                    };
+                }).ToArray(),
+            });
+        });
+
+        // Mid-print include/exclude toggle. POST body: {"excluded": true|false}.
+        // Returns the post-mutation state. ExcludeObject is a no-op during
+        // phases where exclusion isn't meaningful (e.g. before "Layers" phase);
+        // we surface that via the returned isExcluded — the firmware is the
+        // source of truth, not the request body.
+        app.MapPost("/printing/objects/{id:int}/exclude", (
+            int id, ExcludeRequest body, IPrintingService printing) =>
+        {
+            printing.ExcludeObject(id, body.Excluded);
+            return Timed(new { id, isExcluded = printing.IsExcludedObject(id) });
+        });
 
         // Combined snapshot of all Tier 1 telemetry. Same shape as the per-frame
         // payload of the /state/stream WebSocket, but as a one-shot HTTP GET.
@@ -516,4 +661,24 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
         respondedAt = DateTimeOffset.UtcNow,
         data = payload,
     };
+
+    // POST body for /printing/objects/{id}/exclude. ASP.NET Core minimal APIs
+    // bind JSON request bodies to record types automatically; "excluded" maps
+    // to the camelCase JSON key via the web-defaults serializer options.
+    private sealed record ExcludeRequest(bool Excluded);
+
+    // Parse a query-string RGBA hex (RRGGBBAA, 8 hex digits, leading '#' optional).
+    // Returns null for null/empty/malformed input so callers can fall back to a
+    // default — this is query-tuning sugar, not a validation surface.
+    private static RgbaB? ParseRgba(string? s)
+    {
+        if (string.IsNullOrWhiteSpace(s)) return null;
+        var h = s.StartsWith('#') ? s[1..] : s;
+        if (h.Length != 8) return null;
+        if (!byte.TryParse(h.AsSpan(0, 2), System.Globalization.NumberStyles.HexNumber, null, out var r)) return null;
+        if (!byte.TryParse(h.AsSpan(2, 2), System.Globalization.NumberStyles.HexNumber, null, out var g)) return null;
+        if (!byte.TryParse(h.AsSpan(4, 2), System.Globalization.NumberStyles.HexNumber, null, out var b)) return null;
+        if (!byte.TryParse(h.AsSpan(6, 2), System.Globalization.NumberStyles.HexNumber, null, out var a)) return null;
+        return new RgbaB(r, g, b, a);
+    }
 }
