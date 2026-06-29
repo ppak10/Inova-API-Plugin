@@ -297,6 +297,12 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
                 {
                     var o = s.Object;
                     var m = o.Transform;
+                    // Mesh-local axis-aligned bounds (NOT transformed). The
+                    // dashboard 3D view applies `transform` separately to place
+                    // each instance, so local bounds + transform = world AABB.
+                    // Null when the live PrintingObject doesn't carry a Mesh
+                    // (shouldn't happen during an active print, but defensive).
+                    var bounds = o.Mesh?.GetBounds();
                     return new
                     {
                         id = o.Id,
@@ -308,6 +314,11 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
                             new[] { m.M21, m.M22, m.M23, m.M24 },
                             new[] { m.M31, m.M32, m.M33, m.M34 },
                             new[] { m.M41, m.M42, m.M43, m.M44 },
+                        },
+                        bounds = bounds is null ? null : new
+                        {
+                            center = new[] { bounds.Value.Center.X, bounds.Value.Center.Y, bounds.Value.Center.Z },
+                            size = new[] { bounds.Value.Size.X, bounds.Value.Size.Y, bounds.Value.Size.Z },
                         },
                         isExcluded = s.IsExcluded,
                     };
