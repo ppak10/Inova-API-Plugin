@@ -52,8 +52,15 @@ TMP_CONFIG="$(mktemp)"
 trap 'rm -f "${TMP_CONFIG}"' EXIT
 
 if [[ -f "${USER_CONFIG}" ]]; then
-    # Drop anything between (and including) our markers
-    sed "/^${MARKER_BEGIN}$/,/^${MARKER_END}$/d" "${USER_CONFIG}" > "${TMP_CONFIG}"
+    # Drop anything between (and including) our markers, AND normalize CRLF→LF
+    # in the preserved prefix. The firmware's bundled Tomlet trips on mixed
+    # line endings even when the content is otherwise valid (the SLS4All
+    # OptionsClassName template at the top of this file is shipped with CRLF
+    # on some firmware builds; our heredoc below appends LF — without this
+    # normalization the file ends up mixed, parses fine in most TOML libs,
+    # but reliably fails the firmware's parser).
+    sed "/^${MARKER_BEGIN}$/,/^${MARKER_END}$/d" "${USER_CONFIG}" \
+        | sed 's/\r$//' > "${TMP_CONFIG}"
 else
     : > "${TMP_CONFIG}"
 fi
@@ -63,36 +70,35 @@ if [[ -s "${TMP_CONFIG}" ]] && [[ "$(tail -c1 "${TMP_CONFIG}")" != $'\n' ]]; the
     echo "" >> "${TMP_CONFIG}"
 fi
 
+# Inline-table values under bare-segment table headers, NOT dotted-quoted
+# segments in table headers. The firmware's Tomlet has a bug: two sibling
+# headers like [Parent."Quoted.A"] / [Parent."Quoted.B"] cause it to split on
+# the dot INSIDE the quotes when navigating to the existing Parent, throwing
+# TomlNoSuchValueException for the partial-key `"Quoted`. The bare keys
+# `"Quoted.A" = { ... }` form below avoids that codepath entirely — the
+# parser handles quoted dotted bare keys fine, only table headers are buggy.
 cat >> "${TMP_CONFIG}" <<EOF
 ${MARKER_BEGIN}
-# Keys must be quoted because they contain dots — unquoted dotted keys
-# in TOML are interpreted as nested tables, not literal single-key names.
 [Application.PluginAssemblies]
 "${PLUGIN_NAME}" = "${DLL_DST}"
 
-[Application.PluginServices."${PLUGIN_NAME}"]
-Implementation = "${PLUGIN_TYPE}, ${PLUGIN_NAME}"
-Registration = "AsImplementationAndInterfaces"
-Lifetime = "Singleton"
+[Application.PluginServices]
+"${PLUGIN_NAME}" = { Implementation = "${PLUGIN_TYPE}, ${PLUGIN_NAME}", Registration = "AsImplementationAndInterfaces", Lifetime = "Singleton" }
 
-# Substitute the firmware's closed-source ImageCodePlotter with our
-# LoggingCodePlotter decorator. The decorator forwards every ICodePlotter call
-# to the original (constructed reflectively at startup) and additionally tees
-# Process(CodeCommand) into a fan-out + per-layer ring buffer, exposed via the
-# /plotter/commands/stream WS and /plotter/layer/{n}/commands GET.
-# See CompactServiceCollectionExtensions.cs:115 for how this is applied.
-[Application.PluginReplacements."Inova.LoggingCodePlotter"]
-Original = "SLS4All.Compact.Slicing.ImageCodePlotter, SLS4All.Compact.Processing"
-Replacement = "Inova.ApiPlugin.LoggingCodePlotter, ${PLUGIN_NAME}"
-
-# Subclass McuMovementClient to intercept MoveXY/SetLaser. This is where
-# per-vector galvo data is actually visible — the slicer goes through
-# IMovementClient for hardware MCU access, but bypasses the DI ICodePlotter
-# for per-command writes. The intercepted frames flow into LoggingCodePlotter's
-# fan-out (so the same /plotter/commands/stream WS receives them).
-[Application.PluginReplacements."Inova.LoggingMovementClient"]
-Original = "SLS4All.Compact.Movement.McuMovementClient, SLS4All.Compact.McuClient"
-Replacement = "Inova.ApiPlugin.LoggingMovementClient, ${PLUGIN_NAME}"
+# Plugin replacements:
+#   Inova.LoggingCodePlotter: decorates the firmware's closed-source
+#     ImageCodePlotter so every ICodePlotter call is teed into a fan-out +
+#     per-layer ring buffer (exposed via /plotter/commands/stream WS and
+#     /plotter/layer/{n}/commands GET).
+#   Inova.LoggingMovementClient: subclasses McuMovementClient to intercept
+#     MoveXY/SetLaser. The slicer bypasses the DI ICodePlotter for per-command
+#     writes and goes through IMovementClient for MCU access; intercepted
+#     frames here feed the same /plotter/commands/stream fan-out.
+# See CompactServiceCollectionExtensions.cs:115 for how the replacement
+# mechanism is applied.
+[Application.PluginReplacements]
+"Inova.LoggingCodePlotter" = { Original = "SLS4All.Compact.Slicing.ImageCodePlotter, SLS4All.Compact.Processing", Replacement = "Inova.ApiPlugin.LoggingCodePlotter, ${PLUGIN_NAME}" }
+"Inova.LoggingMovementClient" = { Original = "SLS4All.Compact.Movement.McuMovementClient, SLS4All.Compact.McuClient", Replacement = "Inova.ApiPlugin.LoggingMovementClient, ${PLUGIN_NAME}" }
 ${MARKER_END}
 EOF
 
