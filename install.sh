@@ -90,15 +90,20 @@ ${MARKER_BEGIN}
 #     ImageCodePlotter so every ICodePlotter call is teed into a fan-out +
 #     per-layer ring buffer (exposed via /plotter/commands/stream WS and
 #     /plotter/layer/{n}/commands GET).
-#   Inova.LoggingMovementClient: subclasses McuMovementClient to intercept
-#     MoveXY/SetLaser. The slicer bypasses the DI ICodePlotter for per-command
-#     writes and goes through IMovementClient for MCU access; intercepted
-#     frames here feed the same /plotter/commands/stream fan-out.
+#   Inova.LoggingMovementClient (DISABLED 2026-06-29): subclasses
+#     McuMovementClient. First real deployment hung the firmware at
+#     "Creating delayed constructables" phase with 0% CPU and no plugin
+#     trace — strongly suspected DI cycle (LoggingMovementClient depends on
+#     McuPrinterClient, which depends on McuMovementClient, which the
+#     substitution rewrites back to LoggingMovementClient). The plugin DLL
+#     still ships the class for future re-enablement once the cycle is broken
+#     (e.g. via Lazy<McuPrinterClient> or a different registration shape);
+#     leave the TOML line commented out until then.
 # See CompactServiceCollectionExtensions.cs:115 for how the replacement
 # mechanism is applied.
 [Application.PluginReplacements]
 "Inova.LoggingCodePlotter" = { Original = "SLS4All.Compact.Slicing.ImageCodePlotter, SLS4All.Compact.Processing", Replacement = "Inova.ApiPlugin.LoggingCodePlotter, ${PLUGIN_NAME}" }
-"Inova.LoggingMovementClient" = { Original = "SLS4All.Compact.Movement.McuMovementClient, SLS4All.Compact.McuClient", Replacement = "Inova.ApiPlugin.LoggingMovementClient, ${PLUGIN_NAME}" }
+# "Inova.LoggingMovementClient" = { Original = "SLS4All.Compact.Movement.McuMovementClient, SLS4All.Compact.McuClient", Replacement = "Inova.ApiPlugin.LoggingMovementClient, ${PLUGIN_NAME}" }
 ${MARKER_END}
 EOF
 
