@@ -30,6 +30,14 @@
       <HintPath>refs\SLS4All.Compact.Printing.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- SLS4All.Compact.Processing: home of LayerClientOptions (target for
+         runtime recoater-pass overrides) and the closed-source ImageCodePlotter
+         that LoggingCodePlotter wraps. The /debug/layer-options route probes
+         this type's DI registration shape. -->
+    <Reference Include="SLS4All.Compact.Processing">
+      <HintPath>refs\SLS4All.Compact.Processing.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <!-- McuClient + McuClient.Core: pulled from the printer so the plugin can
          subclass McuMovementClient and intercept MoveXY/SetLaser. Same
          deployed-ABI-matching pattern as the Compact refs above. -->

@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using SLS4All.Compact.Graphics;
 using SLS4All.Compact.Helpers;
 using SLS4All.Compact.Movement;
@@ -73,7 +74,7 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
         _app = builder.Build();
         _app.UseDeveloperExceptionPage(); // surface child-Kestrel exceptions in 500 response body
         _app.UseWebSockets();
-        MapEndpoints(_app, _startedAt);
+        MapEndpoints(_app, _startedAt, _parent);
 
         await _app.StartAsync(cancellationToken).ConfigureAwait(false);
         _logger.LogInformation("Inova API plugin listening on http://+:{Port}/", Port);
@@ -93,7 +94,7 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
     private void Forward<T>(IServiceCollection services) where T : class
         => services.AddSingleton(_parent.GetRequiredService<T>());
 
-    private static void MapEndpoints(WebApplication app, DateTimeOffset startedAt)
+    private static void MapEndpoints(WebApplication app, DateTimeOffset startedAt, IServiceProvider parent)
     {
         app.MapGet("/ping", () => "pong");
 
@@ -336,6 +337,61 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
         {
             printing.ExcludeObject(id, body.Excluded);
             return Timed(new { id, isExcluded = printing.IsExcludedObject(id) });
+        });
+
+        // PHASE A PROBE — Reports how LayerClientOptions is registered in the
+        // firmware DI so we know which handle to use for runtime recoater-pass
+        // override mutation. Three registration shapes possible:
+        //   (1) the concrete type as a singleton           → easiest, mutate directly
+        //   (2) IOptions<T>                                → .Value is a stable singleton, mutate
+        //   (3) IOptionsMonitor<T>                         → .CurrentValue may rotate on config reload
+        // Reports each one's resolvability + the current override values, and
+        // whether the underlying instances are the same object (ReferenceEquals).
+        // Delete this route once phase B (the actual set/clear) lands.
+        app.MapGet("/debug/layer-options", () =>
+        {
+            var direct = parent.GetService<LayerClientOptions>();
+            var iopts = parent.GetService<IOptions<LayerClientOptions>>();
+            var imon = parent.GetService<IOptionsMonitor<LayerClientOptions>>();
+
+            static object? Snapshot(LayerClientOptions? o) => o is null ? null : new
+            {
+                recoaterPassesOverride = o.RecoaterPassesOverride,
+                recoaterShakeFactorOverride = o.RecoaterShakeFactorOverride,
+                recoaterPowderSpeedFactorOverride = o.RecoaterPowderSpeedFactorOverride,
+                recoaterPrintSpeedFactorOverride = o.RecoaterPrintSpeedFactorOverride,
+                midRecoatThicknessFactorOverride = o.MidRecoatThicknessFactorOverride,
+            };
+
+            var directV = direct;
+            var ioptsV = iopts?.Value;
+            var imonV = imon?.CurrentValue;
+
+            return Timed(new
+            {
+                registrations = new
+                {
+                    concrete = new
+                    {
+                        resolved = directV is not null,
+                        current = Snapshot(directV),
+                    },
+                    iOptions = new
+                    {
+                        resolved = iopts is not null,
+                        current = Snapshot(ioptsV),
+                        sameInstanceAsConcrete = directV is not null && ioptsV is not null && ReferenceEquals(directV, ioptsV),
+                    },
+                    iOptionsMonitor = new
+                    {
+                        resolved = imon is not null,
+                        current = Snapshot(imonV),
+                        sameInstanceAsConcrete = directV is not null && imonV is not null && ReferenceEquals(directV, imonV),
+                        sameInstanceAsIOptions = ioptsV is not null && imonV is not null && ReferenceEquals(ioptsV, imonV),
+                    },
+                },
+                assemblyOfType = typeof(LayerClientOptions).Assembly.FullName,
+            });
         });
 
         // Combined snapshot of all Tier 1 telemetry. Same shape as the per-frame
