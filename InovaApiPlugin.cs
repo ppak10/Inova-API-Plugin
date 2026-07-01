@@ -355,6 +355,67 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
             });
         });
 
+        // Binary mesh export for a printing object, keyed by mesh hash so
+        // multiple instances of the same STL share a single fetch on the
+        // browser side. Format (all little-endian):
+        //   uint32 magic     = 0x4853454D  ("MESH")
+        //   uint32 version   = 1
+        //   uint32 vertexCount
+        //   uint32 indexCount
+        //   uint32 flags     (bit 0: hasNormals)
+        //   float32[vertexCount * 3] vertices  (x, y, z)
+        //   uint32 [indexCount] indices
+        //   float32[vertexCount * 3] normals   (only if hasNormals)
+        // Response is application/octet-stream. Returns 404 if the hash
+        // isn't currently a printing object (mid-print required).
+        app.MapGet("/printing/meshes/{hash}", (string hash, IPrintingService printing) =>
+        {
+            var states = printing.GetPrintingObjectStates() ?? Array.Empty<PrintingObjectState>();
+            var mesh = states
+                .Select(s => s.Object)
+                .Where(o => o?.Hash == hash && o.Mesh is not null)
+                .Select(o => o!.Mesh)
+                .FirstOrDefault();
+            if (mesh is null) return Results.NotFound();
+
+            var vertexCount = mesh.Vertices?.Length ?? 0;
+            var indexCount = mesh.Indicies?.Length ?? 0;
+            var hasNormals = mesh.Normals is not null && mesh.Normals.Length == vertexCount && vertexCount > 0;
+
+            using var ms = new MemoryStream();
+            using (var bw = new BinaryWriter(ms))
+            {
+                bw.Write((uint)0x4853454D); // "MESH" little-endian
+                bw.Write((uint)1);          // version
+                bw.Write((uint)vertexCount);
+                bw.Write((uint)indexCount);
+                bw.Write((uint)(hasNormals ? 1 : 0));
+                if (mesh.Vertices is not null)
+                {
+                    foreach (var v in mesh.Vertices)
+                    {
+                        bw.Write(v.X);
+                        bw.Write(v.Y);
+                        bw.Write(v.Z);
+                    }
+                }
+                if (mesh.Indicies is not null)
+                {
+                    foreach (var i in mesh.Indicies) bw.Write((uint)i);
+                }
+                if (hasNormals && mesh.Normals is not null)
+                {
+                    foreach (var n in mesh.Normals)
+                    {
+                        bw.Write(n.X);
+                        bw.Write(n.Y);
+                        bw.Write(n.Z);
+                    }
+                }
+            }
+            return Results.Bytes(ms.ToArray(), "application/octet-stream");
+        });
+
         // Mid-print include/exclude toggle. POST body: {"excluded": true|false}.
         // Returns the post-mutation state. ExcludeObject is a no-op during
         // phases where exclusion isn't meaningful (e.g. before "Layers" phase);
