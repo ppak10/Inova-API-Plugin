@@ -32,6 +32,16 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
     private readonly ILogger<InovaApiPlugin> _logger;
     private DateTimeOffset _startedAt;
     private WebApplication? _app;
+    // Subscription that re-applies the runtime recoater-passes override
+    // whenever the firmware's LayerClientOptions gets re-bound (e.g. from
+    // an appsettings hot-reload). Kept alive for the plugin lifetime.
+    private IDisposable? _layerOptionsChangeSubscription;
+
+    // Runtime override state, applied to both IOptions.Value and
+    // IOptionsMonitor.CurrentValue on write (they're distinct instances in
+    // this firmware — see /debug/layer-options findings). Null = defer to
+    // whatever the appsettings-bound configuration produces.
+    private static int? _recoaterPassesOverrideState = null;
 
     public InovaApiPlugin(IServiceProvider parent, ILogger<InovaApiPlugin> logger)
     {
@@ -70,11 +80,27 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
         // is the mid-print include/exclude knob. The id matches the plotter's
         // CodePlotterMarkedObject.Id, so dashboard overlays correlate directly.
         Forward<IPrintingService>(builder.Services);
+        // Both handles for LayerClientOptions — they resolve to different
+        // instances in this firmware (verified via /debug/layer-options), so
+        // the /printing/recoater-passes route writes to both to be safe. We
+        // don't know which one LayerClient.BeginLayer actually reads.
+        Forward<IOptions<LayerClientOptions>>(builder.Services);
+        Forward<IOptionsMonitor<LayerClientOptions>>(builder.Services);
 
         _app = builder.Build();
         _app.UseDeveloperExceptionPage(); // surface child-Kestrel exceptions in 500 response body
         _app.UseWebSockets();
         MapEndpoints(_app, _startedAt, _parent);
+
+        // Re-apply the recoater-passes override on config reload. The firmware
+        // constructs a fresh LayerClientOptions on each reload; without this
+        // re-application our runtime override would silently revert.
+        var layerOptsMonitor = _parent.GetService<IOptionsMonitor<LayerClientOptions>>();
+        _layerOptionsChangeSubscription = layerOptsMonitor?.OnChange((opts, _) =>
+        {
+            var saved = _recoaterPassesOverrideState;
+            if (saved is not null) opts.RecoaterPassesOverride = saved;
+        });
 
         await _app.StartAsync(cancellationToken).ConfigureAwait(false);
         _logger.LogInformation("Inova API plugin listening on http://+:{Port}/", Port);
@@ -82,6 +108,8 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
+        _layerOptionsChangeSubscription?.Dispose();
+        _layerOptionsChangeSubscription = null;
         if (_app is not null)
         {
             await _app.StopAsync(cancellationToken).ConfigureAwait(false);
@@ -337,6 +365,52 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
         {
             printing.ExcludeObject(id, body.Excluded);
             return Timed(new { id, isExcluded = printing.IsExcludedObject(id) });
+        });
+
+        // Runtime recoater-passes override. Takes effect on the NEXT layer
+        // (LayerClient.BeginLayer reads LayerClientOptions.RecoaterPassesOverride
+        // per layer; when non-null it wins over the PrintProfile's per-layer
+        // RecoaterPasses value). Both DI handles are mutated because the
+        // firmware exposes IOptions.Value and IOptionsMonitor.CurrentValue as
+        // distinct instances and we don't know which one LayerClient reads.
+        // The applied value is also cached in _recoaterPassesOverrideState so
+        // the IOptionsMonitor.OnChange handler (see StartAsync) can re-apply
+        // on config reload.
+        //
+        //   GET  /printing/recoater-passes                  → current values
+        //   POST /printing/recoater-passes {"value": 2}     → set (1..5)
+        //   POST /printing/recoater-passes {"value": null}  → clear
+        app.MapGet("/printing/recoater-passes", (
+            IOptions<LayerClientOptions> opts,
+            IOptionsMonitor<LayerClientOptions> monitor) =>
+        {
+            return Timed(new
+            {
+                iOptions = opts.Value.RecoaterPassesOverride,
+                iOptionsMonitor = monitor.CurrentValue.RecoaterPassesOverride,
+                savedState = _recoaterPassesOverrideState,
+            });
+        });
+
+        app.MapPost("/printing/recoater-passes", (
+            RecoaterPassesRequest body,
+            IOptions<LayerClientOptions> opts,
+            IOptionsMonitor<LayerClientOptions> monitor) =>
+        {
+            var value = body.Value;
+            if (value.HasValue && (value.Value < 1 || value.Value > 5))
+            {
+                return Results.BadRequest(new { error = "value must be null (clear) or in 1..5" });
+            }
+            _recoaterPassesOverrideState = value;
+            opts.Value.RecoaterPassesOverride = value;
+            monitor.CurrentValue.RecoaterPassesOverride = value;
+            return Results.Ok(Timed(new
+            {
+                iOptions = opts.Value.RecoaterPassesOverride,
+                iOptionsMonitor = monitor.CurrentValue.RecoaterPassesOverride,
+                savedState = _recoaterPassesOverrideState,
+            }));
         });
 
         // PHASE A PROBE — Reports how LayerClientOptions is registered in the
@@ -733,6 +807,10 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
     // bind JSON request bodies to record types automatically; "excluded" maps
     // to the camelCase JSON key via the web-defaults serializer options.
     private sealed record ExcludeRequest(bool Excluded);
+
+    // POST body for /printing/recoater-passes. `Value` is nullable — send
+    // null (or omit the field) to clear the runtime override.
+    private sealed record RecoaterPassesRequest(int? Value);
 
     // Parse a query-string RGBA hex (RRGGBBAA, 8 hex digits, leading '#' optional).
     // Returns null for null/empty/malformed input so callers can fall back to a
