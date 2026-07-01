@@ -38,6 +38,13 @@
       <HintPath>refs\SLS4All.Compact.Processing.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- SLS4All.Compact.Storage: home of PrintSetup (contains RecoaterPasses —
+         the profile-default value the /printing/recoater-passes GET reports
+         when the runtime override is unset). -->
+    <Reference Include="SLS4All.Compact.Storage">
+      <HintPath>refs\SLS4All.Compact.Storage.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <!-- McuClient + McuClient.Core: pulled from the printer so the plugin can
          subclass McuMovementClient and intercept MoveXY/SetLaser. Same
          deployed-ABI-matching pattern as the Compact refs above. -->

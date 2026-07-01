@@ -443,13 +443,22 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
         //   POST /printing/recoater-passes {"value": null}  → clear
         app.MapGet("/printing/recoater-passes", (
             IOptions<LayerClientOptions> opts,
-            IOptionsMonitor<LayerClientOptions> monitor) =>
+            IOptionsMonitor<LayerClientOptions> monitor,
+            IPrintingService printing) =>
         {
+            // profileDefault = PrintSetup.RecoaterPasses from the currently
+            // running print setup. Only populated during an active print (idle
+            // → null). This is the value the LayerClient falls back to when no
+            // runtime override is set — the "actual number" for the input UI.
+            int? profileDefault = null;
+            try { profileDefault = printing.RunningSetup?.RecoaterPasses; }
+            catch { /* RunningSetup accessor throws when not printing */ }
             return Timed(new
             {
                 iOptions = opts.Value.RecoaterPassesOverride,
                 iOptionsMonitor = monitor.CurrentValue.RecoaterPassesOverride,
                 savedState = _recoaterPassesOverrideState,
+                profileDefault,
             });
         });
 
