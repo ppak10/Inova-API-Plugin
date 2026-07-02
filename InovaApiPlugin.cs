@@ -32,20 +32,21 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
     private readonly ILogger<InovaApiPlugin> _logger;
     private DateTimeOffset _startedAt;
     private WebApplication? _app;
-    // Subscription that re-applies the runtime recoater-passes override
+    // Subscription that re-applies the saved runtime layer overrides
     // whenever the firmware's LayerClientOptions gets re-bound (e.g. from
     // an appsettings hot-reload). Kept alive for the plugin lifetime.
     private IDisposable? _layerOptionsChangeSubscription;
 
-    // Runtime override state, applied to both IOptions.Value and
-    // IOptionsMonitor.CurrentValue on write (they're distinct instances in
-    // this firmware — see /debug/layer-options findings). Null = defer to
-    // whatever the appsettings-bound configuration produces.
-    private static int? _recoaterPassesOverrideState = null;
-
+    // Runtime override state lives in LayerOverrides (one registry for all
+    // overridable LayerClientOptions knobs). Writes go to both IOptions.Value
+    // and IOptionsMonitor.CurrentValue (they're distinct instances in this
+    // firmware — see /debug/layer-options findings). Null = defer to whatever
+    // the appsettings-bound configuration produces.
+    //
     // Read by FullRecoatLayerClient to restore the staged-passes override
     // after temporarily forcing it to 1 during a full-recoat expansion.
-    internal static int? RecoaterPassesOverrideState => _recoaterPassesOverrideState;
+    internal static int? RecoaterPassesOverrideState
+        => (int?)LayerOverrides.GetSaved("recoaterPassesOverride");
 
     public InovaApiPlugin(IServiceProvider parent, ILogger<InovaApiPlugin> logger)
     {
@@ -96,15 +97,12 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
         _app.UseWebSockets();
         MapEndpoints(_app, _startedAt, _parent);
 
-        // Re-apply the recoater-passes override on config reload. The firmware
+        // Re-apply all saved layer overrides on config reload. The firmware
         // constructs a fresh LayerClientOptions on each reload; without this
-        // re-application our runtime override would silently revert.
+        // re-application our runtime overrides would silently revert.
         var layerOptsMonitor = _parent.GetService<IOptionsMonitor<LayerClientOptions>>();
         _layerOptionsChangeSubscription = layerOptsMonitor?.OnChange((opts, _) =>
-        {
-            var saved = _recoaterPassesOverrideState;
-            if (saved is not null) opts.RecoaterPassesOverride = saved;
-        });
+            LayerOverrides.ApplySaved(opts));
 
         await _app.StartAsync(cancellationToken).ConfigureAwait(false);
         _logger.LogInformation("Inova API plugin listening on http://+:{Port}/", Port);
@@ -461,7 +459,7 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
             {
                 iOptions = opts.Value.RecoaterPassesOverride,
                 iOptionsMonitor = monitor.CurrentValue.RecoaterPassesOverride,
-                savedState = _recoaterPassesOverrideState,
+                savedState = RecoaterPassesOverrideState,
                 profileDefault,
             });
         });
@@ -476,15 +474,88 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
             {
                 return Results.BadRequest(new { error = "value must be null (clear) or in 1..5" });
             }
-            _recoaterPassesOverrideState = value;
+            LayerOverrides.SetSaved("recoaterPassesOverride", value);
             opts.Value.RecoaterPassesOverride = value;
             monitor.CurrentValue.RecoaterPassesOverride = value;
             return Results.Ok(Timed(new
             {
                 iOptions = opts.Value.RecoaterPassesOverride,
                 iOptionsMonitor = monitor.CurrentValue.RecoaterPassesOverride,
-                savedState = _recoaterPassesOverrideState,
+                savedState = RecoaterPassesOverrideState,
             }));
+        });
+
+        // Generic runtime overrides for LayerClientOptions — every nullable
+        // "…Override"/"…Force" knob the firmware exposes (speeds, shake,
+        // powder dosing, Z clearance, delays), driven by the LayerOverrides
+        // registry. Writes mutate both DI handles like the recoater-passes
+        // route, and everything saved is re-applied on config reload.
+        // TimeSpan knobs are fractional seconds over the API.
+        //
+        //   GET  /printing/layer-overrides
+        //     → { fields: [ { name, kind, min, max, iOptions, iOptionsMonitor, savedState } ] }
+        //   POST /printing/layer-overrides { "values": { "volumeFactorOverride": 1.2, "zMoveForce": null } }
+        //     → partial update; null clears a field; unknown names → 400
+        app.MapGet("/printing/layer-overrides", (
+            IOptions<LayerClientOptions> opts,
+            IOptionsMonitor<LayerClientOptions> monitor) =>
+            Timed(new { fields = SnapshotOverrideFields(opts, monitor) }));
+
+        app.MapPost("/printing/layer-overrides", (
+            LayerOverridesRequest body,
+            IOptions<LayerClientOptions> opts,
+            IOptionsMonitor<LayerClientOptions> monitor) =>
+        {
+            if (body.Values is null || body.Values.Count == 0)
+            {
+                return Results.BadRequest(new { error = "body.values (object) required" });
+            }
+
+            // Validate everything before applying anything, so a bad entry
+            // can't leave a partial write behind.
+            var parsed = new List<(LayerOverrideField field, object? value)>();
+            foreach (var (name, element) in body.Values)
+            {
+                var field = LayerOverrides.Find(name);
+                if (field is null)
+                {
+                    return Results.BadRequest(new { error = $"unknown override field '{name}'" });
+                }
+                if (element.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+                {
+                    parsed.Add((field, null));
+                    continue;
+                }
+                if (element.ValueKind != JsonValueKind.Number)
+                {
+                    return Results.BadRequest(new { error = $"'{field.Name}' must be a number or null" });
+                }
+                if (field.Kind == "int")
+                {
+                    if (!element.TryGetInt32(out var i) || i < field.Min || i > field.Max)
+                    {
+                        return Results.BadRequest(new { error = $"'{field.Name}' must be an integer in {field.Min}..{field.Max}" });
+                    }
+                    parsed.Add((field, i));
+                }
+                else
+                {
+                    var d = element.GetDouble();
+                    if (!double.IsFinite(d) || d < field.Min || d > field.Max)
+                    {
+                        return Results.BadRequest(new { error = $"'{field.Name}' must be in {field.Min}..{field.Max}" });
+                    }
+                    parsed.Add((field, d));
+                }
+            }
+
+            foreach (var (field, value) in parsed)
+            {
+                LayerOverrides.SetSaved(field.Name, value);
+                field.Set(opts.Value, value);
+                field.Set(monitor.CurrentValue, value);
+            }
+            return Results.Ok(Timed(new { fields = SnapshotOverrideFields(opts, monitor) }));
         });
 
         // Full-recoat passes override. Unlike /printing/recoater-passes (the
@@ -935,6 +1006,25 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
     // POST body for /printing/recoater-passes-full. `Powder` omitted/null
     // leaves the sticky repeat-dose setting unchanged.
     private sealed record FullRecoatPassesRequest(int? Value, bool? Powder);
+
+    // POST body for /printing/layer-overrides: a partial map of field name →
+    // number|null. JsonElement values so int/double/null can be told apart
+    // per field kind during validation.
+    private sealed record LayerOverridesRequest(Dictionary<string, JsonElement>? Values);
+
+    private static object[] SnapshotOverrideFields(
+        IOptions<LayerClientOptions> opts,
+        IOptionsMonitor<LayerClientOptions> monitor)
+        => LayerOverrides.Fields.Select(f => (object)new
+        {
+            name = f.Name,
+            kind = f.Kind,
+            min = f.Min,
+            max = f.Max,
+            iOptions = f.Get(opts.Value),
+            iOptionsMonitor = f.Get(monitor.CurrentValue),
+            savedState = LayerOverrides.GetSaved(f.Name),
+        }).ToArray();
 
     // POST body for /printing/recoater-passes. `Value` is nullable — send
     // null (or omit the field) to clear the runtime override.
