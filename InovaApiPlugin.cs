@@ -16,6 +16,8 @@ using SLS4All.Compact.Nesting;
 using SLS4All.Compact.Power;
 using SLS4All.Compact.Printing;
 using SLS4All.Compact.Slicing;
+using SLS4All.Compact.Storage;
+using SLS4All.Compact.Storage.PrintSessions;
 using SLS4All.Compact.Temperature;
 
 namespace Inova.ApiPlugin;
@@ -498,13 +500,15 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
         //     → partial update; null clears a field; unknown names → 400
         app.MapGet("/printing/layer-overrides", (
             IOptions<LayerClientOptions> opts,
-            IOptionsMonitor<LayerClientOptions> monitor) =>
-            Timed(new { fields = SnapshotOverrideFields(opts, monitor) }));
+            IOptionsMonitor<LayerClientOptions> monitor,
+            IPrintingService printing) =>
+            Timed(new { fields = SnapshotOverrideFields(opts, monitor, printing) }));
 
         app.MapPost("/printing/layer-overrides", (
             LayerOverridesRequest body,
             IOptions<LayerClientOptions> opts,
-            IOptionsMonitor<LayerClientOptions> monitor) =>
+            IOptionsMonitor<LayerClientOptions> monitor,
+            IPrintingService printing) =>
         {
             if (body.Values is null || body.Values.Count == 0)
             {
@@ -555,7 +559,7 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
                 field.Set(opts.Value, value);
                 field.Set(monitor.CurrentValue, value);
             }
-            return Results.Ok(Timed(new { fields = SnapshotOverrideFields(opts, monitor) }));
+            return Results.Ok(Timed(new { fields = SnapshotOverrideFields(opts, monitor, printing) }));
         });
 
         // Full-recoat passes override. Unlike /printing/recoater-passes (the
@@ -605,6 +609,112 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
                 powder = FullRecoatLayerClient.RepeatPowderDose,
                 replacementActive = layerClient is FullRecoatLayerClient,
                 layerClientType = layerClient?.GetType().FullName,
+            }));
+        });
+
+        // Print-setup overrides — the firmware's NATIVE mid-print tuning
+        // channel (IPrintingService.SetupOverrides): phase temperature
+        // targets [°C] and laser energy (total percent scale + fill density;
+        // outline densities as a list). PrintingService resets these to empty
+        // at every print start, so they are meaningful only DURING a print.
+        // `defaults` mirrors SetupOverridesDefaults — the running profile's
+        // baseline values — for UI placeholders.
+        //
+        //   GET  /printing/setup-overrides
+        //     → { values: {...}, outlineEnergyDensities, defaults: {...}, defaultOutlineEnergyDensities }
+        //   POST /printing/setup-overrides { "values": { "beginLayerTemperatureTarget": 176, "laserFillEnergyDensity": null } }
+        //     → partial update; null clears (reverts to profile); values may
+        //       also include "laserOutlineEnergyDensities": [..]|null
+        app.MapGet("/printing/setup-overrides", (IPrintingService printing) =>
+        {
+            var current = printing.SetupOverrides;
+            PrintSetupOverrides? defaults = null;
+            try { defaults = printing.SetupOverridesDefaults; }
+            catch { /* not printing */ }
+            return Timed(new
+            {
+                values = PrintSetupOverrideFields.Snapshot(current),
+                outlineEnergyDensities = current?.LaserOutlineEnergyDensities?.ToArray(),
+                defaults = PrintSetupOverrideFields.Snapshot(defaults),
+                defaultOutlineEnergyDensities = defaults?.LaserOutlineEnergyDensities?.ToArray(),
+            });
+        });
+
+        app.MapPost("/printing/setup-overrides", (
+            LayerOverridesRequest body,
+            IPrintingService printing) =>
+        {
+            if (body.Values is null || body.Values.Count == 0)
+            {
+                return Results.BadRequest(new { error = "body.values (object) required" });
+            }
+
+            // Validate everything before applying anything.
+            var parsedScalars = new List<(PrintSetupOverrideField field, decimal? value)>();
+            StorageList<decimal>? parsedOutline = null;
+            var setOutline = false;
+            foreach (var (name, element) in body.Values)
+            {
+                if (string.Equals(name, "laserOutlineEnergyDensities", StringComparison.OrdinalIgnoreCase))
+                {
+                    setOutline = true;
+                    if (element.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+                        continue;
+                    if (element.ValueKind != JsonValueKind.Array)
+                    {
+                        return Results.BadRequest(new { error = "'laserOutlineEnergyDensities' must be an array of numbers or null" });
+                    }
+                    var outlineItems = new List<decimal>();
+                    foreach (var item in element.EnumerateArray())
+                    {
+                        if (item.ValueKind != JsonValueKind.Number || !item.TryGetDecimal(out var d) || d < 0 || d > 100)
+                        {
+                            return Results.BadRequest(new { error = "'laserOutlineEnergyDensities' entries must be numbers in 0..100" });
+                        }
+                        outlineItems.Add(d);
+                    }
+                    parsedOutline = StorageList.Create<decimal>(outlineItems);
+                    continue;
+                }
+
+                var field = PrintSetupOverrideFields.Find(name);
+                if (field is null)
+                {
+                    return Results.BadRequest(new { error = $"unknown setup-override field '{name}'" });
+                }
+                if (element.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+                {
+                    parsedScalars.Add((field, null));
+                    continue;
+                }
+                if (element.ValueKind != JsonValueKind.Number || !element.TryGetDecimal(out var value)
+                    || value < field.Min || value > field.Max)
+                {
+                    return Results.BadRequest(new { error = $"'{field.Name}' must be a number in {field.Min}..{field.Max} or null" });
+                }
+                parsedScalars.Add((field, value));
+            }
+
+            // Copy-mutate-assign: the property setter swaps the instance the
+            // print pipeline reads, so in-place mutation of the current one
+            // is avoided (mirrors how the firmware's own UI applies changes).
+            var next = printing.SetupOverrides.Clone();
+            foreach (var (field, value) in parsedScalars)
+                field.Set(next, value);
+            if (setOutline)
+                next.LaserOutlineEnergyDensities = parsedOutline;
+            printing.SetupOverrides = next;
+
+            var current = printing.SetupOverrides;
+            PrintSetupOverrides? defaults = null;
+            try { defaults = printing.SetupOverridesDefaults; }
+            catch { /* not printing */ }
+            return Results.Ok(Timed(new
+            {
+                values = PrintSetupOverrideFields.Snapshot(current),
+                outlineEnergyDensities = current?.LaserOutlineEnergyDensities?.ToArray(),
+                defaults = PrintSetupOverrideFields.Snapshot(defaults),
+                defaultOutlineEnergyDensities = defaults?.LaserOutlineEnergyDensities?.ToArray(),
             }));
         });
 
@@ -1014,8 +1124,17 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
 
     private static object[] SnapshotOverrideFields(
         IOptions<LayerClientOptions> opts,
-        IOptionsMonitor<LayerClientOptions> monitor)
-        => LayerOverrides.Fields.Select(f => (object)new
+        IOptionsMonitor<LayerClientOptions> monitor,
+        IPrintingService printing)
+    {
+        // profileValue = what the running print profile prescribes for this
+        // knob (the effective value while the override is null). Only
+        // populated during an active print — RunningSetup is null/throws when
+        // idle.
+        SLS4All.Compact.PrintSessions.PrintSetup? setup = null;
+        try { setup = printing.RunningSetup; }
+        catch { /* not printing */ }
+        return LayerOverrides.Fields.Select(f => (object)new
         {
             name = f.Name,
             kind = f.Kind,
@@ -1024,7 +1143,9 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
             iOptions = f.Get(opts.Value),
             iOptionsMonitor = f.Get(monitor.CurrentValue),
             savedState = LayerOverrides.GetSaved(f.Name),
+            profileValue = setup is null ? null : f.ProfileGet?.Invoke(setup),
         }).ToArray();
+    }
 
     // POST body for /printing/recoater-passes. `Value` is nullable — send
     // null (or omit the field) to clear the runtime override.
