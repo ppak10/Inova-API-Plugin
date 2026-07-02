@@ -99,10 +99,18 @@ ${MARKER_BEGIN}
 #     still ships the class for future re-enablement once the cycle is broken
 #     (e.g. via Lazy<McuPrinterClient> or a different registration shape);
 #     leave the TOML line commented out until then.
+#   Inova.FullRecoatLayerClient: subclasses LayerClient to expand one layer
+#     into N complete recoats at 1/N thickness (the /printing/recoater-passes-full
+#     override). Passthrough (single base call) while the override is unset.
+#     DI-cycle note: unlike LoggingMovementClient, LayerClient's dependencies
+#     (movement/printer/temperature/surface clients) don't resolve ILayerClient
+#     back, so the substitution shouldn't recreate that boot hang — but watch
+#     the first boot after enabling regardless.
 # See CompactServiceCollectionExtensions.cs:115 for how the replacement
 # mechanism is applied.
 [Application.PluginReplacements]
 "Inova.LoggingCodePlotter" = { Original = "SLS4All.Compact.Slicing.ImageCodePlotter, SLS4All.Compact.Processing", Replacement = "Inova.ApiPlugin.LoggingCodePlotter, ${PLUGIN_NAME}" }
+"Inova.FullRecoatLayerClient" = { Original = "SLS4All.Compact.Movement.LayerClient, SLS4All.Compact.Processing", Replacement = "Inova.ApiPlugin.FullRecoatLayerClient, ${PLUGIN_NAME}" }
 # "Inova.LoggingMovementClient" = { Original = "SLS4All.Compact.Movement.McuMovementClient, SLS4All.Compact.McuClient", Replacement = "Inova.ApiPlugin.LoggingMovementClient, ${PLUGIN_NAME}" }
 ${MARKER_END}
 EOF

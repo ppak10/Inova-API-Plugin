@@ -43,6 +43,10 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
     // whatever the appsettings-bound configuration produces.
     private static int? _recoaterPassesOverrideState = null;
 
+    // Read by FullRecoatLayerClient to restore the staged-passes override
+    // after temporarily forcing it to 1 during a full-recoat expansion.
+    internal static int? RecoaterPassesOverrideState => _recoaterPassesOverrideState;
+
     public InovaApiPlugin(IServiceProvider parent, ILogger<InovaApiPlugin> logger)
     {
         _parent = parent;
@@ -480,6 +484,48 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
                 iOptions = opts.Value.RecoaterPassesOverride,
                 iOptionsMonitor = monitor.CurrentValue.RecoaterPassesOverride,
                 savedState = _recoaterPassesOverrideState,
+            }));
+        });
+
+        // Full-recoat passes override. Unlike /printing/recoater-passes (the
+        // firmware's staged powder delivery), this expands each layer into N
+        // COMPLETE recoats at 1/N layer thickness via FullRecoatLayerClient
+        // (a PluginReplacements subclass of LayerClient — see install.sh).
+        // Takes effect on the next BeginLayer. While a layer is being
+        // expanded, the staged override is transiently forced to 1 so each
+        // sub-recoat is a single uninterrupted sweep.
+        //
+        //   GET  /printing/recoater-passes-full                  → current value + replacement status
+        //   POST /printing/recoater-passes-full {"value": 2}     → set (1..5; 1 = passthrough)
+        //   POST /printing/recoater-passes-full {"value": null}  → clear
+        app.MapGet("/printing/recoater-passes-full", () =>
+        {
+            // replacementActive tells the dashboard whether the LayerClient
+            // substitution actually loaded — the override is a no-op without
+            // it (e.g. replacement line missing/commented in the user toml).
+            var layerClient = parent.GetService<ILayerClient>();
+            return Timed(new
+            {
+                value = FullRecoatLayerClient.FullPassesOverride,
+                replacementActive = layerClient is FullRecoatLayerClient,
+                layerClientType = layerClient?.GetType().FullName,
+            });
+        });
+
+        app.MapPost("/printing/recoater-passes-full", (RecoaterPassesRequest body) =>
+        {
+            var value = body.Value;
+            if (value.HasValue && (value.Value < 1 || value.Value > 5))
+            {
+                return Results.BadRequest(new { error = "value must be null (clear) or in 1..5" });
+            }
+            FullRecoatLayerClient.FullPassesOverride = value;
+            var layerClient = parent.GetService<ILayerClient>();
+            return Results.Ok(Timed(new
+            {
+                value = FullRecoatLayerClient.FullPassesOverride,
+                replacementActive = layerClient is FullRecoatLayerClient,
+                layerClientType = layerClient?.GetType().FullName,
             }));
         });
 
