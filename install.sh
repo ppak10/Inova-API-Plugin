@@ -100,8 +100,10 @@ ${MARKER_BEGIN}
 #     (e.g. via Lazy<McuPrinterClient> or a different registration shape);
 #     leave the TOML line commented out until then.
 #   Inova.FullRecoatLayerClient: subclasses LayerClient to expand one layer
-#     into N complete recoats at 1/N thickness (the /printing/recoater-passes-full
-#     override). Passthrough (single base call) while the override is unset.
+#     into N full-height recoats — one normal recoat plus N-1 repeat sweeps
+#     at the same bed height, optionally each feeding a fresh powder dose
+#     (the /printing/recoater-passes-full override). Passthrough (single
+#     base call) while the override is unset.
 #     DI-cycle note: unlike LoggingMovementClient, LayerClient's dependencies
 #     (movement/printer/temperature/surface clients) don't resolve ILayerClient
 #     back, so the substitution shouldn't recreate that boot hang — but watch

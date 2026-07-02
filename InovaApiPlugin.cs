@@ -489,15 +489,19 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
 
         // Full-recoat passes override. Unlike /printing/recoater-passes (the
         // firmware's staged powder delivery), this expands each layer into N
-        // COMPLETE recoats at 1/N layer thickness via FullRecoatLayerClient
-        // (a PluginReplacements subclass of LayerClient — see install.sh).
+        // FULL-HEIGHT recoats via FullRecoatLayerClient (a PluginReplacements
+        // subclass of LayerClient — see install.sh): the first is the normal
+        // recoat, the rest are repeat sweeps at the same bed height. `powder`
+        // controls whether repeats feed a fresh full powder dose (short-feed
+        // compensation) or run dry (debris clearing); sticky until changed.
         // Takes effect on the next BeginLayer. While a layer is being
         // expanded, the staged override is transiently forced to 1 so each
         // sub-recoat is a single uninterrupted sweep.
         //
-        //   GET  /printing/recoater-passes-full                  → current value + replacement status
-        //   POST /printing/recoater-passes-full {"value": 2}     → set (1..5; 1 = passthrough)
-        //   POST /printing/recoater-passes-full {"value": null}  → clear
+        //   GET  /printing/recoater-passes-full                          → current state + replacement status
+        //   POST /printing/recoater-passes-full {"value": 2}             → set (1..5; 1 = passthrough)
+        //   POST /printing/recoater-passes-full {"value": 3, "powder": false} → dry repeat sweeps
+        //   POST /printing/recoater-passes-full {"value": null}          → clear
         app.MapGet("/printing/recoater-passes-full", () =>
         {
             // replacementActive tells the dashboard whether the LayerClient
@@ -507,12 +511,13 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
             return Timed(new
             {
                 value = FullRecoatLayerClient.FullPassesOverride,
+                powder = FullRecoatLayerClient.RepeatPowderDose,
                 replacementActive = layerClient is FullRecoatLayerClient,
                 layerClientType = layerClient?.GetType().FullName,
             });
         });
 
-        app.MapPost("/printing/recoater-passes-full", (RecoaterPassesRequest body) =>
+        app.MapPost("/printing/recoater-passes-full", (FullRecoatPassesRequest body) =>
         {
             var value = body.Value;
             if (value.HasValue && (value.Value < 1 || value.Value > 5))
@@ -520,10 +525,13 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
                 return Results.BadRequest(new { error = "value must be null (clear) or in 1..5" });
             }
             FullRecoatLayerClient.FullPassesOverride = value;
+            if (body.Powder is bool powder)
+                FullRecoatLayerClient.RepeatPowderDose = powder;
             var layerClient = parent.GetService<ILayerClient>();
             return Results.Ok(Timed(new
             {
                 value = FullRecoatLayerClient.FullPassesOverride,
+                powder = FullRecoatLayerClient.RepeatPowderDose,
                 replacementActive = layerClient is FullRecoatLayerClient,
                 layerClientType = layerClient?.GetType().FullName,
             }));
@@ -923,6 +931,10 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
     // bind JSON request bodies to record types automatically; "excluded" maps
     // to the camelCase JSON key via the web-defaults serializer options.
     private sealed record ExcludeRequest(bool Excluded);
+
+    // POST body for /printing/recoater-passes-full. `Powder` omitted/null
+    // leaves the sticky repeat-dose setting unchanged.
+    private sealed record FullRecoatPassesRequest(int? Value, bool? Powder);
 
     // POST body for /printing/recoater-passes. `Value` is nullable — send
     // null (or omit the field) to clear the runtime override.
