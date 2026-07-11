@@ -14,6 +14,7 @@ using SLS4All.Compact.Helpers;
 using SLS4All.Compact.Movement;
 using SLS4All.Compact.Nesting;
 using SLS4All.Compact.Power;
+using SLS4All.Compact.Camera;
 using SLS4All.Compact.Printing;
 using SLS4All.Compact.Slicing;
 using SLS4All.Compact.Storage;
@@ -44,8 +45,8 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
     // Runtime override state lives in LayerOverrides (one registry for all
     // overridable LayerClientOptions knobs). Writes go to both IOptions.Value
     // and IOptionsMonitor.CurrentValue (they're distinct instances in this
-    // firmware — see /debug/layer-options findings). Null = defer to whatever
-    // the appsettings-bound configuration produces.
+    // firmware). Null = defer to whatever the appsettings-bound configuration
+    // produces.
     //
     // Read by FullRecoatLayerClient to restore the staged-passes override
     // after temporarily forcing it to 1 during a full-recoat expansion.
@@ -90,9 +91,8 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
         // CodePlotterMarkedObject.Id, so dashboard overlays correlate directly.
         Forward<IPrintingService>(builder.Services);
         // Both handles for LayerClientOptions — they resolve to different
-        // instances in this firmware (verified via /debug/layer-options), so
-        // the /printing/recoater-passes route writes to both to be safe. We
-        // don't know which one LayerClient.BeginLayer actually reads.
+        // instances in this firmware, so the /printing/recoater-passes route
+        // writes to both to be safe.
         Forward<IOptions<LayerClientOptions>>(builder.Services);
         Forward<IOptionsMonitor<LayerClientOptions>>(builder.Services);
         // IPrintProfileStorage is the firmware's print-profile store (the same
@@ -106,6 +106,11 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
         // Older ABI: PowderTuningService is a separate DI-registered singleton.
         // Newer ABI: ExecutePowderTuningCommand moved onto IPrintingService itself.
         // Forward conditionally — PowderTuningEndpoints handles the fallback via reflection.
+        // ICameraClient is the firmware's camera singleton — the consumer of the
+        // rpicam-vid MJPEG subprocess. Forwarding it lets CameraEndpoints subscribe
+        // to ICameraClient.Captured and push JPEG frames over WebSocket without
+        // any additional firmware polling.
+        Forward<ICameraClient>(builder.Services);
         var powderTuningService = _parent.GetService<IPowderTuning>();
         if (powderTuningService is not null)
             builder.Services.AddSingleton<IPowderTuning>(powderTuningService);
@@ -150,6 +155,8 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
         app.MapPrintProfileEndpoints();
         // Job CRUD (list / detail / rename / profile-swap / delete) — see JobEndpoints.
         app.MapJobEndpoints();
+        // Camera JPEG stream — pushes raw JPEG frames over WebSocket.
+        app.MapCameraEndpoints();
         // Powder tuning session commands (layer / bed-level / surface / params / print / stop).
         app.MapPowderTuningEndpoints();
 
@@ -739,61 +746,6 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
                 defaults = PrintSetupOverrideFields.Snapshot(defaults),
                 defaultOutlineEnergyDensities = defaults?.LaserOutlineEnergyDensities?.ToArray(),
             }));
-        });
-
-        // PHASE A PROBE — Reports how LayerClientOptions is registered in the
-        // firmware DI so we know which handle to use for runtime recoater-pass
-        // override mutation. Three registration shapes possible:
-        //   (1) the concrete type as a singleton           → easiest, mutate directly
-        //   (2) IOptions<T>                                → .Value is a stable singleton, mutate
-        //   (3) IOptionsMonitor<T>                         → .CurrentValue may rotate on config reload
-        // Reports each one's resolvability + the current override values, and
-        // whether the underlying instances are the same object (ReferenceEquals).
-        // Delete this route once phase B (the actual set/clear) lands.
-        app.MapGet("/debug/layer-options", () =>
-        {
-            var direct = parent.GetService<LayerClientOptions>();
-            var iopts = parent.GetService<IOptions<LayerClientOptions>>();
-            var imon = parent.GetService<IOptionsMonitor<LayerClientOptions>>();
-
-            static object? Snapshot(LayerClientOptions? o) => o is null ? null : new
-            {
-                recoaterPassesOverride = o.RecoaterPassesOverride,
-                recoaterShakeFactorOverride = o.RecoaterShakeFactorOverride,
-                recoaterPowderSpeedFactorOverride = o.RecoaterPowderSpeedFactorOverride,
-                recoaterPrintSpeedFactorOverride = o.RecoaterPrintSpeedFactorOverride,
-                midRecoatThicknessFactorOverride = o.MidRecoatThicknessFactorOverride,
-            };
-
-            var directV = direct;
-            var ioptsV = iopts?.Value;
-            var imonV = imon?.CurrentValue;
-
-            return Timed(new
-            {
-                registrations = new
-                {
-                    concrete = new
-                    {
-                        resolved = directV is not null,
-                        current = Snapshot(directV),
-                    },
-                    iOptions = new
-                    {
-                        resolved = iopts is not null,
-                        current = Snapshot(ioptsV),
-                        sameInstanceAsConcrete = directV is not null && ioptsV is not null && ReferenceEquals(directV, ioptsV),
-                    },
-                    iOptionsMonitor = new
-                    {
-                        resolved = imon is not null,
-                        current = Snapshot(imonV),
-                        sameInstanceAsConcrete = directV is not null && imonV is not null && ReferenceEquals(directV, imonV),
-                        sameInstanceAsIOptions = ioptsV is not null && imonV is not null && ReferenceEquals(ioptsV, imonV),
-                    },
-                },
-                assemblyOfType = typeof(LayerClientOptions).Assembly.FullName,
-            });
         });
 
         // Combined snapshot of all Tier 1 telemetry. Same shape as the per-frame
