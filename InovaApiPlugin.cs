@@ -17,6 +17,7 @@ using SLS4All.Compact.Power;
 using SLS4All.Compact.Printing;
 using SLS4All.Compact.Slicing;
 using SLS4All.Compact.Storage;
+using SLS4All.Compact.Storage.PrintJobs;
 using SLS4All.Compact.Storage.PrintProfiles;
 using SLS4All.Compact.Storage.PrintSessions;
 using SLS4All.Compact.Temperature;
@@ -98,6 +99,9 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
         // singleton the UI edits and the print pipeline resolves profiles from).
         // Backs the /profiles CRUD routes — see PrintProfileEndpoints.
         Forward<IPrintProfileStorage>(builder.Services);
+        // IJobStorage is the firmware's job store (.s4a ZIP archives on disk).
+        // Backs the /jobs CRUD routes — see JobEndpoints.
+        Forward<IJobStorage>(builder.Services);
 
         _app = builder.Build();
         _app.UseDeveloperExceptionPage(); // surface child-Kestrel exceptions in 500 response body
@@ -137,6 +141,8 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
 
         // Print-profile CRUD (view / create / edit / delete) — see PrintProfileEndpoints.
         app.MapPrintProfileEndpoints();
+        // Job CRUD (list / detail / rename / profile-swap / delete) — see JobEndpoints.
+        app.MapJobEndpoints();
 
         app.MapGet("/info", () => new
         {
