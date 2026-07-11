@@ -17,6 +17,7 @@ using SLS4All.Compact.Power;
 using SLS4All.Compact.Printing;
 using SLS4All.Compact.Slicing;
 using SLS4All.Compact.Storage;
+using SLS4All.Compact.Storage.PrintProfiles;
 using SLS4All.Compact.Storage.PrintSessions;
 using SLS4All.Compact.Temperature;
 
@@ -93,6 +94,10 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
         // don't know which one LayerClient.BeginLayer actually reads.
         Forward<IOptions<LayerClientOptions>>(builder.Services);
         Forward<IOptionsMonitor<LayerClientOptions>>(builder.Services);
+        // IPrintProfileStorage is the firmware's print-profile store (the same
+        // singleton the UI edits and the print pipeline resolves profiles from).
+        // Backs the /profiles CRUD routes — see PrintProfileEndpoints.
+        Forward<IPrintProfileStorage>(builder.Services);
 
         _app = builder.Build();
         _app.UseDeveloperExceptionPage(); // surface child-Kestrel exceptions in 500 response body
@@ -129,6 +134,9 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
     private static void MapEndpoints(WebApplication app, DateTimeOffset startedAt, IServiceProvider parent)
     {
         app.MapGet("/ping", () => "pong");
+
+        // Print-profile CRUD (view / create / edit / delete) — see PrintProfileEndpoints.
+        app.MapPrintProfileEndpoints();
 
         app.MapGet("/info", () => new
         {

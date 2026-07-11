@@ -24,6 +24,33 @@ All data endpoints wrap their payload in `{ respondedAt, data: ... }`. Combined 
 
 Sample clients in `client/` — Python (`httpx` + `websockets`) and TypeScript (`ws`).
 
+### Print profiles (CRUD)
+
+REST over the firmware's own `IPrintProfileStorage` — the same profiles the
+firmware UI edits and the print pipeline resolves at print time. Not wrapped in
+the `{ respondedAt, data }` telemetry envelope; these are config resources.
+See `PrintProfileEndpoints.cs`.
+
+| Endpoint | Behavior |
+| --- | --- |
+| `GET /profiles` | List `[{ id, name, isDefault }]` in the firmware's ordering (default first). |
+| `GET /profiles/{id}` | The stored profile. Returns the sparse **user delta** by default; `?merged=true` returns the effective values (delta merged over the system Default) the print actually uses. `404` if unknown. |
+| `POST /profiles` | Create. JSON body is a partial profile; `name` is required. Starts from an empty delta (untouched fields inherit the Default). Server assigns a fresh `id` (any body `id` is ignored). Returns `201` with the stored profile. |
+| `PUT /profiles/{id}` | Edit (partial). Only fields present in the body change; send a field as `null` to clear it (revert to inheriting the Default). Editing the Default profile itself is routed through `SetDefaultProfile`. `404` if unknown. |
+| `DELETE /profiles/{id}` | Delete a user profile → `204`. The system Default cannot be deleted (`400`). `404` if unknown. |
+
+Profile field types follow the firmware model exactly, because the plugin
+round-trips the request through `System.Text.Json` on the real `PrintProfile`
+type (each property's own converter is honored): scalars are `decimal`/`int`/
+`bool`; `*Delay` fields are `TimeSpan` strings (`"00:00:05"`); `material` is an
+enum **string** (e.g. `"PA12"`); `shrinkageCorrectionType` is an enum **int**;
+`laserOutlineEnergyDensities` is a JSON array of numbers. Field names are
+camelCase (case-insensitive on input).
+
+This surface intentionally does not tune a profile mid-print — use
+`/printing/setup-overrides` (phase temps + laser energy) and
+`/printing/layer-overrides` (recoater/speed/dosing knobs) for that.
+
 ## Repository layout
 
 | Path | Purpose |
