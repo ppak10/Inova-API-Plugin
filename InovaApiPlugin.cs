@@ -102,6 +102,13 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
         // IJobStorage is the firmware's job store (.s4a ZIP archives on disk).
         // Backs the /jobs CRUD routes — see JobEndpoints.
         Forward<IJobStorage>(builder.Services);
+        // IPowderTuning may or may not be registered depending on firmware version.
+        // Older ABI: PowderTuningService is a separate DI-registered singleton.
+        // Newer ABI: ExecutePowderTuningCommand moved onto IPrintingService itself.
+        // Forward conditionally — PowderTuningEndpoints handles the fallback via reflection.
+        var powderTuningService = _parent.GetService<IPowderTuning>();
+        if (powderTuningService is not null)
+            builder.Services.AddSingleton<IPowderTuning>(powderTuningService);
 
         _app = builder.Build();
         _app.UseDeveloperExceptionPage(); // surface child-Kestrel exceptions in 500 response body
@@ -143,6 +150,8 @@ public sealed class InovaApiPlugin : IHostedService, IConstructable
         app.MapPrintProfileEndpoints();
         // Job CRUD (list / detail / rename / profile-swap / delete) — see JobEndpoints.
         app.MapJobEndpoints();
+        // Powder tuning session commands (layer / bed-level / surface / params / print / stop).
+        app.MapPowderTuningEndpoints();
 
         app.MapGet("/info", () => new
         {
