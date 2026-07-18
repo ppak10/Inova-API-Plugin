@@ -42,6 +42,62 @@ internal static class PrintProfileEndpoints
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
         "SLS4All", "PrintProfiles");
 
+    // Enforced field bounds — the firmware's PrintProfile model carries NO
+    // validation of its own (0/97 properties have range attributes, no
+    // Validate method), so this table is the source of truth keeping
+    // out-of-range values out of storage, for every caller (GUI form, MCP
+    // tools, curl). Temperature ceilings are deliberately conservative
+    // (200 °C — PA12-class work runs well under it); raise here on purpose
+    // if a hotter material ever needs it. Keep in sync with the MCP
+    // profile_set schema and the GUI form ranges.
+    private static readonly Dictionary<string, (double Min, double Max)> _bounds =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            // Thickness fields are MICROMETERS (live data: layer 100,
+            // bedPreparation 13000, printCap 5000).
+            ["layerThickness"] = (50, 300),
+            ["recoaterPasses"] = (1, 10),
+            ["recoaterPowderSpeedPercent"] = (1, 200),
+            ["recoaterPrintSpeedPercent"] = (1, 200),
+            ["heatingTargetPowder"] = (0, 200),
+            ["heatingTargetPrint"] = (0, 200),
+            ["heatingTargetPrintBed"] = (0, 200),
+            ["heatingRate"] = (0, 100),
+            ["heatingThreshold"] = (0, 200),
+            ["surfaceTarget"] = (0, 200),
+            ["beginLayerTemperatureTarget"] = (0, 200),
+            ["bedPreparationTemperatureTarget"] = (0, 200),
+            ["bedPreparationThickness"] = (0, 50000),
+            ["printCapTemperatureTarget"] = (0, 200),
+            ["printCapThickness"] = (0, 50000),
+            ["laserOnPercent"] = (0, 100),
+            ["totalEnergyDensityPercent"] = (1, 500),
+            ["laserFirstOutlineEnergyDensity"] = (0, 100),
+            ["laserOtherOutlineEnergyDensity"] = (0, 100),
+            ["laserFillEnergyDensity"] = (0, 100),
+            ["outlineCount"] = (0, 20),
+            ["coolingTarget"] = (0, 200),
+            ["coolingThreshold1"] = (0, 200),
+            ["coolingThreshold2"] = (0, 200),
+            ["coolingRate1"] = (0, 100),
+            ["coolingRate2"] = (0, 100),
+        };
+
+    // Collect bound violations for the numeric fields present in a patch
+    // body. Nulls pass (null = revert to inheriting the Default); unknown
+    // keys pass (ApplyPatch decides what they mean).
+    private static List<string> BoundViolations(JsonObject body)
+    {
+        var errors = new List<string>();
+        foreach (var (key, node) in body)
+        {
+            if (node is null || !_bounds.TryGetValue(key, out var b)) continue;
+            if (node is JsonValue v && v.TryGetValue<double>(out var d) && (d < b.Min || d > b.Max))
+                errors.Add($"{key}={d} out of range [{b.Min}..{b.Max}]");
+        }
+        return errors;
+    }
+
     private static DateTimeOffset? FileModifiedAt(Guid id, bool isDefault)
     {
         try
@@ -116,6 +172,10 @@ internal static class PrintProfileEndpoints
             if (string.IsNullOrWhiteSpace(name))
                 return Results.BadRequest(new { error = "\"name\" is required and must be non-empty" });
 
+            var violations = BoundViolations(body);
+            if (violations.Count > 0)
+                return Results.BadRequest(new { error = "validation failed: " + string.Join("; ", violations) });
+
             PrintProfile profile;
             try { profile = ApplyPatch(new PrintProfile(), body); }
             catch (JsonException ex) { return Results.BadRequest(new { error = "invalid profile field: " + ex.Message }); }
@@ -143,6 +203,10 @@ internal static class PrintProfileEndpoints
         {
             if (body is null)
                 return Results.BadRequest(new { error = "JSON object body required" });
+
+            var putViolations = BoundViolations(body);
+            if (putViolations.Count > 0)
+                return Results.BadRequest(new { error = "validation failed: " + string.Join("; ", putViolations) });
 
             var defaultId = (await storage.GetDefaultProfile(ct).ConfigureAwait(false)).Id;
             var isDefault = id == defaultId;
