@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using SLS4All.Compact.Nesting;
 using SLS4All.Compact.Storage;
 using SLS4All.Compact.Storage.PrintJobs;
 using SLS4All.Compact.Storage.PrintProfiles;
@@ -105,6 +106,92 @@ internal static class JobEndpoints
 
             await jobs.DeleteJob(id, ct).ConfigureAwait(false);
             return Results.NoContent();
+        });
+
+        // Placed instances of a STORED job — the nesting solution persisted in
+        // the .s4a's NestingSnapshot, available whether or not anything is
+        // printing (unlike /job/current/parts, which reads the live
+        // INestingService and is empty when idle). Shape mirrors
+        // /printing/objects: `transform` is the snapshot's MeshPrintTransform
+        // as a row-major 4x4 (V·M convention, same as the live route);
+        // `transformState` carries the raw nesting-editor placement
+        // (position/rotation/quaternion/scale) as a fallback for jobs whose
+        // print transform was never computed. Bounds are NOT included — the
+        // client derives mesh-local bounds from the fetched geometry.
+        // Chamber dims come from the nesting service and are valid while idle.
+        // Non-Automatic jobs (or jobs never nested) return an empty list.
+        app.MapGet("/jobs/{id:guid}/instances", async (
+            Guid id, IJobStorage jobs, INestingService nesting, CancellationToken ct) =>
+        {
+            var job = await jobs.TryGetJob(id, ct).ConfigureAwait(false);
+            if (job is null) return Results.NotFound(new { error = $"no job with id {id}" });
+
+            var dim = nesting.NestingDim;
+            var instances = (job.NestingState as AutomaticJob.NestingSnapshot)?.Instances
+                ?? Array.Empty<AutomaticJobInstance>();
+
+            return Results.Json(new
+            {
+                chamber = dim is null ? null : new
+                {
+                    sizeX = dim.SizeX,
+                    sizeY = dim.SizeY,
+                    sizeZ = dim.SizeZ,
+                },
+                instances = instances.Select(i =>
+                {
+                    var t = i.TransformState;
+                    var m = i.MeshPrintTransform;
+                    return new
+                    {
+                        id = i.Id,
+                        name = i.ObjectCopy?.Name,
+                        hash = i.Hash,
+                        isOverlapping = i.IsOverlapping,
+                        transform = new[]
+                        {
+                            new[] { m.M11, m.M12, m.M13, m.M14 },
+                            new[] { m.M21, m.M22, m.M23, m.M24 },
+                            new[] { m.M31, m.M32, m.M33, m.M34 },
+                            new[] { m.M41, m.M42, m.M43, m.M44 },
+                        },
+                        transformState = new
+                        {
+                            position = new[] { t.PX, t.PY, t.PZ },
+                            rotation = new[] { t.RX, t.RY, t.RZ },
+                            quaternion = new[] { t.QX, t.QY, t.QZ, t.QW },
+                            scale = new[] { t.SX, t.SY, t.SZ },
+                        },
+                    };
+                }).ToArray(),
+            }, _json);
+        });
+
+        // Mesh geometry for a STORED job's object file, keyed by content hash —
+        // the off-print counterpart of /printing/meshes/{hash}. Reads the raw
+        // STL out of the .s4a archive via IJobStorage.GetObject and converts it
+        // to the same binary MESH blob the live route serves (see StlMesh).
+        // 404 for unknown job or hash; 422 if the STL fails to parse.
+        app.MapGet("/jobs/{id:guid}/meshes/{hash}", async (
+            Guid id, string hash, IJobStorage jobs, CancellationToken ct) =>
+        {
+            var job = await jobs.TryGetJob(id, ct).ConfigureAwait(false);
+            if (job is null) return Results.NotFound(new { error = $"no job with id {id}" });
+
+            var file = job.ObjectFiles?.FirstOrDefault(
+                f => string.Equals(f.Hash, hash, StringComparison.OrdinalIgnoreCase));
+            if (file is null)
+                return Results.NotFound(new { error = "no object file with that hash in this job" });
+
+            await using var stream = await jobs
+                .GetObject(new JobObjectPath(id, file.Name), ct).ConfigureAwait(false);
+            using var ms = new MemoryStream();
+            await stream.CopyToAsync(ms, ct).ConfigureAwait(false);
+
+            var blob = StlMesh.ToMeshBlob(ms.ToArray());
+            if (blob is null)
+                return Results.UnprocessableEntity(new { error = $"could not parse '{file.Name}' as STL" });
+            return Results.Bytes(blob, "application/octet-stream");
         });
     }
 
