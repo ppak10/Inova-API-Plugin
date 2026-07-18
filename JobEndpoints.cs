@@ -18,9 +18,10 @@ namespace Inova.ApiPlugin;
 /// in-memory <see cref="IPrintJob"/> and call <c>UpsertJob</c> — the same
 /// pattern the firmware's Razor pages use.
 ///
-/// CREATE is intentionally omitted: creating a job requires uploading STL
-/// mesh files, which belongs to a file-upload flow, not a JSON endpoint.
-/// Use <c>CloneJob</c> on an existing job as a template instead (future work).
+/// CREATE-from-scratch is intentionally omitted: creating a job requires
+/// uploading STL mesh files, which belongs to a file-upload flow, not a
+/// JSON endpoint. POST /jobs/{id}/clone covers the create-from-template
+/// workflow instead (added 2026-07-18).
 /// </summary>
 internal static class JobEndpoints
 {
@@ -95,6 +96,39 @@ internal static class JobEndpoints
             // desc if the re-read fails.
             var updatedDesc = await jobs.TryGetJobDescription(id, ct).ConfigureAwait(false) ?? desc;
             return Results.Json(ProjectJob(updatedDesc, job), _json);
+        });
+
+        // Clone — the firmware's own IJobStorage.CloneJob (the same operation
+        // the firmware UI's duplicate uses): copies the .s4a under a new id,
+        // then optionally re-points the print profile via the UpsertJob
+        // pattern. We pass suggestedId ourselves because IPrintJob doesn't
+        // expose an Id — the clone's identity must be known up front.
+        // Mechanically generic on purpose: the "[TEMPLATE]" policy (agents may
+        // only clone template jobs) is enforced in the MCP layer, not here.
+        // 404 unknown source; 400 for a missing/blank name.
+        app.MapPost("/jobs/{id:guid}/clone", async (
+            Guid id, CloneJobRequest? body, IJobStorage jobs, CancellationToken ct) =>
+        {
+            if (body is null || string.IsNullOrWhiteSpace(body.Name))
+                return Results.BadRequest(new { error = "'name' is required" });
+
+            var srcDesc = await jobs.TryGetJobDescription(id, ct).ConfigureAwait(false);
+            if (srcDesc is null) return Results.NotFound(new { error = $"no job with id {id}" });
+
+            var newId = Guid.NewGuid();
+            var clone = await jobs.CloneJob(id, body.Name.Trim(), newId, ct).ConfigureAwait(false);
+
+            if (body.PrintProfileId is not null)
+            {
+                var profileId = Guid.TryParse(body.PrintProfileId, out var g) ? g : Guid.Empty;
+                clone.PrintProfile = new PrintProfileReference { Id = profileId };
+                await jobs.UpsertJob(clone, ct).ConfigureAwait(false);
+            }
+
+            var cloneDesc = await jobs.TryGetJobDescription(newId, ct).ConfigureAwait(false);
+            if (cloneDesc is null)
+                return Results.Problem($"clone created but not found under suggested id {newId}");
+            return Results.Json(ProjectJob(cloneDesc, clone), _json, statusCode: StatusCodes.Status201Created);
         });
 
         // Delete. 404 if unknown, otherwise 204. The storage handles removing
@@ -229,4 +263,6 @@ internal static class JobEndpoints
     }
 
     private sealed record PatchJobRequest(string? Name, string? PrintProfileId);
+
+    private sealed record CloneJobRequest(string? Name, string? PrintProfileId);
 }
