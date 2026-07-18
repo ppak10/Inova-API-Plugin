@@ -120,9 +120,17 @@ internal static class JobEndpoints
 
             if (body.PrintProfileId is not null)
             {
+                // Re-read before mutating: CloneJob's returned object keeps the
+                // requested name verbatim, while the storage sanitizes
+                // filesystem-hostile characters ("/" → "_") into the persisted
+                // name — UpsertJob on the raw-named object computes a
+                // mismatched path and throws FileNotFound. A fresh read is
+                // consistent (same pattern as the PATCH route above).
+                var fresh = await jobs.TryGetJob(newId, ct).ConfigureAwait(false) ?? clone;
                 var profileId = Guid.TryParse(body.PrintProfileId, out var g) ? g : Guid.Empty;
-                clone.PrintProfile = new PrintProfileReference { Id = profileId };
-                await jobs.UpsertJob(clone, ct).ConfigureAwait(false);
+                fresh.PrintProfile = new PrintProfileReference { Id = profileId };
+                await jobs.UpsertJob(fresh, ct).ConfigureAwait(false);
+                clone = fresh;
             }
 
             var cloneDesc = await jobs.TryGetJobDescription(newId, ct).ConfigureAwait(false);
