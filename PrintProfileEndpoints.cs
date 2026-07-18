@@ -33,19 +33,61 @@ internal static class PrintProfileEndpoints
     // JSON does, e.g. "shrinkageCorrectionType": 2).
     private static readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web);
 
+    // Profiles are stored as "<name>.<guid>.json" (the default profile as
+    // "DefaultProfile.json") under ~/SLS4All/PrintProfiles. The storage
+    // interface exposes no timestamps, and most profiles were never stamped
+    // with CreatedAt — the file mtime is the only real date, so the list
+    // endpoint stats the files directly.
+    private static readonly string _profilesDir = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+        "SLS4All", "PrintProfiles");
+
+    private static DateTimeOffset? FileModifiedAt(Guid id, bool isDefault)
+    {
+        try
+        {
+            var file = isDefault
+                ? Path.Combine(_profilesDir, "DefaultProfile.json")
+                : Directory.EnumerateFiles(_profilesDir, $"*.{id}.json").FirstOrDefault();
+            if (file is null || !File.Exists(file)) return null;
+            return File.GetLastWriteTimeUtc(file);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     public static void MapPrintProfileEndpoints(this WebApplication app)
     {
-        // List — lightweight {id, name, isDefault} descriptions, default first
-        // in the firmware's own ordering. Cheap enough to poll for a picker UI.
+        // List — {id, name, isDefault, createdAt, modifiedAt} in the firmware's
+        // own ordering. createdAt lives only on the full profile (descriptions
+        // don't carry it, and most existing profiles were never stamped);
+        // modifiedAt is the profile file's mtime — the reliable "real" date.
         app.MapGet("/profiles", async (IPrintProfileStorage storage, CancellationToken ct) =>
         {
-            var descriptions = await storage.GetOrderedProfileDescriptions(ct).ConfigureAwait(false);
-            return Results.Ok(descriptions.Select(d => new
+            var result = new List<object>();
+            foreach (var d in await storage.GetOrderedProfileDescriptions(ct).ConfigureAwait(false))
             {
-                id = d.Id,
-                name = d.Name,
-                isDefault = d.IsDefault,
-            }).ToArray());
+                DateTimeOffset? createdAt = null;
+                try
+                {
+                    var p = d.IsDefault
+                        ? await storage.GetDefaultProfile(ct).ConfigureAwait(false)
+                        : await storage.TryGetProfile(d.Id, ct).ConfigureAwait(false);
+                    createdAt = p?.CreatedAt;
+                }
+                catch { /* unreadable profile — list it without a date */ }
+                result.Add(new
+                {
+                    id = d.Id,
+                    name = d.Name,
+                    isDefault = d.IsDefault,
+                    createdAt,
+                    modifiedAt = FileModifiedAt(d.Id, d.IsDefault),
+                });
+            }
+            return Results.Ok(result.ToArray());
         });
 
         // Get one. Returns the stored user delta by default; ?merged=true returns
@@ -79,6 +121,9 @@ internal static class PrintProfileEndpoints
             catch (JsonException ex) { return Results.BadRequest(new { error = "invalid profile field: " + ex.Message }); }
 
             profile.Id = Guid.NewGuid();
+            // Stamp creation time (the firmware doesn't always) — feeds the
+            // GUI's sort-by-date column.
+            profile.CreatedAt ??= DateTimeOffset.UtcNow;
             // Give the nested shrinkage-correction record its own identity so two
             // profiles never share a child id (the Default's child id would
             // otherwise be inherited through the serialized template).
