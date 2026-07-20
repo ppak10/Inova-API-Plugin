@@ -81,6 +81,43 @@ internal static class PrintProfileEndpoints
             ["coolingThreshold2"] = (0, 200),
             ["coolingRate1"] = (0, 100),
             ["coolingRate2"] = (0, 100),
+            // Expanded process-parameter surface (2026-07-20) — mirrors the MCP
+            // profile_set schema + GUI form so the agentic system can tune the
+            // full knob set toward a material TDS. Bounds informed by observed
+            // values across stored profiles. Delay/TimeSpan and bool fields are
+            // intentionally absent (not numeric; not range-checked here).
+            ["recoaterShakePercent"] = (0, 100),
+            ["recoaterMaxDistance"] = (0, 1000),
+            ["addPowderDepth"] = (0, 50000),
+            ["powderVolumePercent"] = (0, 500),
+            ["zMove"] = (0, 5000),
+            ["heatingTargetPrintBed2"] = (0, 200),
+            ["heatingTargetPrintBed2Thickness1"] = (0, 50000),
+            ["heatingTargetPrintBed2Thickness2"] = (0, 50000),
+            ["heatingTargetAnalyse"] = (0, 200),
+            ["heatingLayerStartTemperature"] = (0, 200),
+            ["heatingLayerEndTemperature"] = (0, 200),
+            ["halogenMaxPercent"] = (0, 100),
+            ["surfaceTarget2"] = (0, 200),
+            ["surfaceHeatingRate"] = (0, 100),
+            ["bedPreparationTemperatureIncreaseFromPercent"] = (0, 100),
+            ["bedPreparationTemperatureIncreaseToPercent"] = (0, 100),
+            ["bedPreparationFirstExtraThickLayerCount"] = (0, 100),
+            ["bedPreparationFirstExtraThicknessMultiplier"] = (0, 10),
+            ["totalIncreasedEnergyDensityPercent"] = (0, 500),
+            ["outlinePowerIncrease"] = (0, 100),
+            ["outlinePowerPrecision"] = (0, 100),
+            ["fillOutlineSkipCount"] = (0, 20),
+            ["hotspotOverlapPercent"] = (0, 100),
+            ["sinteredVolumeFactor"] = (0, 10),
+            ["customSinteredVolumePercent"] = (0, 500),
+            ["coolingTimePercent"] = (0, 100),
+            ["autoTuningExpectedDetectionTemperature"] = (0, 200),
+            ["autoTuningMaxTemperature"] = (0, 200),
+            ["autoTuningTemperatureOffset"] = (-50, 50),
+            ["autoTuningTemperatureStep"] = (0, 50),
+            ["autoTuningThresholdPercent"] = (0, 100),
+            ["autoTuningLayerThicknessMultiplier"] = (0, 10),
         };
 
     // Collect bound violations for the numeric fields present in a patch
